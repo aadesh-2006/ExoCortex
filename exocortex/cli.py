@@ -35,15 +35,19 @@ def format_header(title: str) -> str:
 def cmd_status(args: argparse.Namespace) -> int:
     """Run health check and print system status."""
     report = run_health_check()
+    config = get_config()
     
     if args.json:
-        print(json.dumps(report.to_dict(), indent=2))
+        data = report.to_dict()
+        data["workspace_dir"] = str(config.workspace_dir)
+        print(json.dumps(data, indent=2))
         return 0
 
     print(format_header(f"ExoCortex v{report.version} - System Status"))
     status_symbol = "[OK]" if report.status == "healthy" else "[WARN]"
     print(f"Overall Status: {status_symbol} {report.status.upper()}")
     print(f"Python Runtime: {report.python_version}")
+    print(f"Workspace Dir:  {config.workspace_dir}")
     
     print("\n[Hardware & Acceleration]")
     hw = report.hardware
@@ -68,6 +72,35 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("\n[Notices & Warnings]")
         for w in report.warnings:
             print(f"  - {w}")
+
+    print("=" * 64 + "\n")
+    return 0
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    """List all registered tools with their schemas and security permission levels."""
+    from exocortex.tools.registry import get_default_tool_registry
+
+    reg = get_default_tool_registry()
+    tools = reg.list_tools()
+
+    if args.json:
+        print(json.dumps([t.get_schema() for t in tools], indent=2))
+        return 0
+
+    print(format_header("ExoCortex Registered Tools & Security Permissions"))
+    print(f"Total Registered Tools: {len(tools)}\n")
+
+    for t in tools:
+        perm_label = f"[{t.permission_level.value.upper()}]"
+        print(f"• {t.name:<24} {perm_label:<18}")
+        print(f"    Description: {t.description}")
+        if t.parameters:
+            params_str = ", ".join(f"{p.name} ({p.type}{', required' if p.required else ', optional'})" for p in t.parameters)
+            print(f"    Parameters:  {params_str}")
+        else:
+            print(f"    Parameters:  None")
+        print()
 
     print("=" * 64 + "\n")
     return 0
@@ -204,14 +237,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     subparsers = parser.add_subparsers(dest="command", help="ExoCortex subcommands")
 
-    # Status / Health command
+    # Status / Health / Info command
     status_parser = subparsers.add_parser("status", help="Check system health and status")
     status_parser.add_argument("--json", action="store_true", help="Output health report in JSON format")
     status_parser.set_defaults(func=cmd_status)
 
+    info_parser = subparsers.add_parser("info", help="Alias for status check")
+    info_parser.add_argument("--json", action="store_true", help="Output health report in JSON format")
+    info_parser.set_defaults(func=cmd_status)
+
     health_parser = subparsers.add_parser("health", help="Alias for status check")
     health_parser.add_argument("--json", action="store_true", help="Output health report in JSON format")
     health_parser.set_defaults(func=cmd_status)
+
+    # Tools command
+    tools_parser = subparsers.add_parser("tools", help="List all registered tools and security permissions")
+    tools_parser.add_argument("--json", action="store_true", help="Output registered tools in JSON schema format")
+    tools_parser.set_defaults(func=cmd_tools)
 
     # Hardware command
     hw_parser = subparsers.add_parser("hardware", help="Inspect hardware and Snapdragon acceleration")

@@ -147,6 +147,85 @@ class MockSLMProvider(SLMProvider):
             )
             return json.dumps(doc), tool_calls
 
+        if "notepad" in lower or "calc" in lower or "paint" in lower or "explorer" in lower or "launch" in lower or "open app" in lower:
+            app = "notepad"
+            if "calc" in lower:
+                app = "calculator"
+            elif "paint" in lower:
+                app = "paint"
+            elif "explorer" in lower:
+                app = "explorer"
+            doc = {
+                "thought_summary": f"User wants to launch {app}.",
+                "intent": "application_launch",
+                "steps": [{"tool": "launch_application", "arguments": {"application": app}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="launch_application", arguments={"application": app}, call_id="call_launch_01"))
+            return json.dumps(doc), tool_calls
+
+        if "browser" in lower or "http://" in lower or "https://" in lower or "url" in lower or "website" in lower or "google" in lower:
+            url_match = re.search(r'https?://[^\s"\']+', text)
+            target_url = url_match.group(0) if url_match else "https://www.google.com"
+            doc = {
+                "thought_summary": f"User wants to open web address: {target_url}.",
+                "intent": "web_navigation",
+                "steps": [{"tool": "open_url", "arguments": {"url": target_url}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="open_url", arguments={"url": target_url}, call_id="call_url_01"))
+            return json.dumps(doc), tool_calls
+
+        if "create folder" in lower or "create directory" in lower or "make folder" in lower or "mkdir" in lower:
+            match = re.search(r'(?:folder|directory)\s+(?:called\s+|named\s+)?["\']?([^"\']+)["\']?', text, re.IGNORECASE)
+            folder_name = match.group(1).strip() if match else "test"
+            doc = {
+                "thought_summary": f"Creating directory '{folder_name}' in workspace.",
+                "intent": "filesystem_create",
+                "steps": [{"tool": "create_directory", "arguments": {"path": folder_name}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="create_directory", arguments={"path": folder_name}, call_id="call_mkdir_01"))
+            return json.dumps(doc), tool_calls
+
+        if "read" in lower and ("file" in lower or ".txt" in lower or "notes" in lower):
+            match = re.search(r'read\s+(?:file\s+)?["\']?([a-zA-Z0-9_\-\./\\]+\.[a-zA-Z0-9]+)["\']?', text, re.IGNORECASE)
+            file_name = match.group(1) if match else "notes.txt"
+            doc = {
+                "thought_summary": f"Reading file '{file_name}' from workspace.",
+                "intent": "filesystem_read",
+                "steps": [{"tool": "read_text_file", "arguments": {"path": file_name}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="read_text_file", arguments={"path": file_name}, call_id="call_read_01"))
+            return json.dumps(doc), tool_calls
+
+        if "list" in lower and ("file" in lower or "directory" in lower or "workspace" in lower or "folder" in lower):
+            doc = {
+                "thought_summary": "Listing workspace files and directories.",
+                "intent": "filesystem_inspection",
+                "steps": [{"tool": "list_directory", "arguments": {"path": ""}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="list_directory", arguments={"path": ""}, call_id="call_ls_01"))
+            return json.dumps(doc), tool_calls
+
+        if "process" in lower or "tasks" in lower or "running programs" in lower:
+            doc = {
+                "thought_summary": "Inspecting running processes.",
+                "intent": "process_inspection",
+                "steps": [{"tool": "list_processes", "arguments": {}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
+            tool_calls.append(ToolCallRequest(tool_name="list_processes", arguments={}, call_id="call_proc_01"))
+            return json.dumps(doc), tool_calls
+
         if "hello" in lower or "who are you" in lower or "hi " in lower:
             doc = {
                 "thought_summary": "User greeting.",

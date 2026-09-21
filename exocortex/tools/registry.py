@@ -98,13 +98,31 @@ _default_registry: Optional[ToolRegistry] = None
 
 
 def get_default_tool_registry() -> ToolRegistry:
-    """Get the singleton default tool registry pre-loaded with built-in tools."""
+    """Get the singleton default tool registry pre-loaded with built-in and Windows OS tools."""
     global _default_registry
     if _default_registry is None:
         from exocortex.tools.builtin import EchoTool, HealthCheckTool, SystemInfoTool
+        from exocortex.tools.windows import (
+            CreateDirectoryTool,
+            LaunchApplicationTool,
+            ListDirectoryTool,
+            ListProcessesTool,
+            OpenUrlTool,
+            ReadTextFileTool,
+        )
 
         _default_registry = ToolRegistry()
+        # Foundation diagnostics
         _default_registry.register(EchoTool())
         _default_registry.register(SystemInfoTool())
         _default_registry.register(HealthCheckTool())
+
+        # Windows Desktop & OS Automation tools
+        _default_registry.register(LaunchApplicationTool())
+        _default_registry.register(OpenUrlTool())
+        _default_registry.register(ListDirectoryTool())
+        _default_registry.register(ReadTextFileTool())
+        _default_registry.register(CreateDirectoryTool())
+        _default_registry.register(ListProcessesTool())
+
     return _default_registry

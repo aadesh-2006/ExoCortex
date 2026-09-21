@@ -37,6 +37,11 @@ class Settings:
             os.path.expanduser(os.getenv("EXOCORTEX_DATA_DIR", "~/.exocortex"))
         )
     )
+    workspace_dir: Path = field(
+        default_factory=lambda: Path(
+            os.path.expanduser(os.getenv("EXOCORTEX_WORKSPACE_DIR", "~/.exocortex/workspace"))
+        )
+    )
 
     # SLM Settings
     slm_provider: SLMProviderType = field(
@@ -83,6 +88,11 @@ class Settings:
         """Ensure that the data directory exists."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         return self.data_dir
+
+    def ensure_workspace_dir(self) -> Path:
+        """Ensure that the sandboxed workspace directory exists."""
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        return self.workspace_dir
 
 
 _config_instance: Settings | None = None

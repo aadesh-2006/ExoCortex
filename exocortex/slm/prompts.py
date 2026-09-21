@@ -50,6 +50,54 @@ Assistant:
 }}
 ```
 
+User: "Open Notepad"
+Assistant:
+```json
+{{
+  "thought_summary": "User wants to open Notepad. Calling launch_application.",
+  "intent": "application_launch",
+  "steps": [{{"tool": "launch_application", "arguments": {{"application": "notepad"}}}}],
+  "requires_confirmation": false,
+  "direct_response": null
+}}
+```
+
+User: "Open Google in my browser"
+Assistant:
+```json
+{{
+  "thought_summary": "User wants to open Google. Calling open_url.",
+  "intent": "web_navigation",
+  "steps": [{{"tool": "open_url", "arguments": {{"url": "https://www.google.com"}}}}],
+  "requires_confirmation": false,
+  "direct_response": null
+}}
+```
+
+User: "List the files in my workspace"
+Assistant:
+```json
+{{
+  "thought_summary": "User wants to inspect workspace directory. Calling list_directory.",
+  "intent": "filesystem_inspection",
+  "steps": [{{"tool": "list_directory", "arguments": {{"path": ""}}}}],
+  "requires_confirmation": false,
+  "direct_response": null
+}}
+```
+
+User: "Show me my running processes"
+Assistant:
+```json
+{{
+  "thought_summary": "User wants to inspect running processes. Calling list_processes.",
+  "intent": "process_inspection",
+  "steps": [{{"tool": "list_processes", "arguments": {{}}}}],
+  "requires_confirmation": false,
+  "direct_response": null
+}}
+```
+
 User: "Delete all files in C:\\"
 Assistant:
 ```json
