@@ -94,24 +94,31 @@ class MockSLMProvider(SLMProvider):
         return self.generate(prompt=prompt, temperature=temperature, max_tokens=max_tokens, **kwargs)
 
     def _simulate_reasoning(self, text: str) -> tuple[str, List[ToolCallRequest]]:
-        """Simulate realistic SLM intent parsing and tool invocation."""
+        """Simulate realistic SLM intent parsing and structured tool decision."""
         lower = text.lower()
         tool_calls: List[ToolCallRequest] = []
 
         if "health" in lower or "status" in lower or "diagnostics" in lower:
+            doc = {
+                "thought_summary": "Checking system health status and component readiness.",
+                "intent": "system_health",
+                "steps": [{"tool": "health_check", "arguments": {}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
             tool_calls.append(
-                ToolCallRequest(
-                    tool_name="health_check",
-                    arguments={},
-                    call_id="call_health_01",
-                )
+                ToolCallRequest(tool_name="health_check", arguments={}, call_id="call_health_01")
             )
-            return (
-                "I will check the system health status and component readiness.",
-                tool_calls,
-            )
+            return json.dumps(doc), tool_calls
 
         if "system" in lower or "hardware" in lower or "specs" in lower or "cpu" in lower:
+            doc = {
+                "thought_summary": "Inspecting host hardware and system specifications.",
+                "intent": "hardware_inspection",
+                "steps": [{"tool": "system_info", "arguments": {"detail_level": "full"}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
             tool_calls.append(
                 ToolCallRequest(
                     tool_name="system_info",
@@ -119,14 +126,18 @@ class MockSLMProvider(SLMProvider):
                     call_id="call_sysinfo_01",
                 )
             )
-            return (
-                "I will inspect your host hardware and system specifications.",
-                tool_calls,
-            )
+            return json.dumps(doc), tool_calls
 
         if "echo" in lower or "say" in lower:
             match = re.search(r'(?:echo|say)\s+["\']?([^"\']+)["\']?', text, re.IGNORECASE)
             msg = match.group(1) if match else text
+            doc = {
+                "thought_summary": f"Echoing message: {msg}",
+                "intent": "echo_message",
+                "steps": [{"tool": "echo", "arguments": {"message": msg}}],
+                "requires_confirmation": False,
+                "direct_response": None,
+            }
             tool_calls.append(
                 ToolCallRequest(
                     tool_name="echo",
@@ -134,9 +145,23 @@ class MockSLMProvider(SLMProvider):
                     call_id="call_echo_01",
                 )
             )
-            return (f"Echoing requested message: '{msg}'", tool_calls)
+            return json.dumps(doc), tool_calls
 
-        return (
-            f"Understood request: '{text}'. ExoCortex reasoning complete.",
-            tool_calls,
-        )
+        if "hello" in lower or "who are you" in lower or "hi " in lower:
+            doc = {
+                "thought_summary": "User greeting.",
+                "intent": "general_greeting",
+                "steps": [],
+                "requires_confirmation": False,
+                "direct_response": "Hello! I am ExoCortex, your local-first autonomous PC agent for Windows.",
+            }
+            return json.dumps(doc), []
+
+        doc = {
+            "thought_summary": f"General request: {text}",
+            "intent": "general_inquiry",
+            "steps": [],
+            "requires_confirmation": False,
+            "direct_response": f"Understood request: '{text}'. ExoCortex reasoning complete.",
+        }
+        return json.dumps(doc), []

@@ -10,8 +10,11 @@ from exocortex.slm.mock_provider import MockSLMProvider
 
 
 class TestAgent(unittest.TestCase):
+    def setUp(self):
+        self.mock_provider = MockSLMProvider()
+
     def test_agent_run_hardware_query(self):
-        agent = ExoCortexAgent()
+        agent = ExoCortexAgent(slm_provider=self.mock_provider)
         result = agent.run("Show system hardware specs and CPU")
         self.assertIsInstance(result, AgentRunResult)
         self.assertTrue(result.success)
@@ -22,14 +25,14 @@ class TestAgent(unittest.TestCase):
         self.assertTrue(result.executed_tools[0]["success"])
 
     def test_agent_run_health_query(self):
-        agent = ExoCortexAgent()
+        agent = ExoCortexAgent(slm_provider=self.mock_provider)
         result = agent.run("Check system health status")
         self.assertTrue(result.success)
         self.assertEqual(result.decision.intent, "system_health")
         self.assertIn("health_check", [s.tool for s in result.decision.steps])
 
     def test_agent_run_conversational_no_tool(self):
-        agent = ExoCortexAgent()
+        agent = ExoCortexAgent(slm_provider=self.mock_provider)
         result = agent.run("Hello! Who are you?")
         self.assertTrue(result.success)
         self.assertEqual(len(result.decision.steps), 0)

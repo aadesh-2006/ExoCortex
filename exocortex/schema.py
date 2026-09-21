@@ -33,9 +33,11 @@ class AgentDecision(BaseModel):
     sequence of tool steps, confirmation flag, and optional direct response.
     """
     thought_summary: str = Field(
+        default="Action planned by agent.",
         description="Concise 1-2 sentence action rationale (no raw chain-of-thought)"
     )
     intent: str = Field(
+        default="general_action",
         description="High-level classified intent (e.g. system_health, hardware_inspection, general_inquiry)"
     )
     steps: List[StructuredStep] = Field(

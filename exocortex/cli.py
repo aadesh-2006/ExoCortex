@@ -109,16 +109,18 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     print(f"Model Name:              {res.model_name}")
     print(f"Execution Provider:      {res.execution_provider}")
     print(f"NPU Accelerated:         {res.is_npu_accelerated}")
+    print(f"Model Load Time:         {res.model_load_time_ms:.1f} ms")
     print(f"Benchmark Iterations:    {res.iterations}")
-    print(f"Avg Total Latency:       {res.avg_total_latency_ms:.2f} ms")
-    print(f"Avg Generation Latency:  {res.avg_generation_latency_ms:.2f} ms")
+    print(f"Avg Total Latency:       {res.avg_total_latency_ms:.1f} ms")
+    print(f"Avg Prompt (Prefill):    {res.avg_prompt_latency_ms:.1f} ms")
+    print(f"Avg Generation Latency:  {res.avg_generation_latency_ms:.1f} ms")
     print(f"Avg Inference Speed:     {res.avg_tokens_per_second:.1f} tokens/sec")
     print(f"Total Tokens Generated:  {res.total_tokens_generated}")
     print(f"Process Peak RAM:        {res.peak_ram_mb:.1f} MB")
 
     print("\n--- Iteration Breakdown ---")
     for r in res.runs:
-        print(f" Run #{r['run_index']}: {r['latency_ms']:.1f} ms | {r['completion_tokens']} tokens | {r['tokens_per_second']:.1f} tok/s | RAM: {r['ram_mb']:.1f} MB")
+        print(f" Run #{r['run_index']}: {r['total_latency_ms']:.1f} ms (Prompt: {r['prompt_latency_ms']:.1f} ms, Gen: {r['generation_latency_ms']:.1f} ms) | {r['completion_tokens']} tokens | {r['tokens_per_second']:.1f} tok/s | RAM: {r['ram_mb']:.1f} MB")
         print(f"   Prompt: '{r['prompt']}'")
 
     print("=" * 64 + "\n")
