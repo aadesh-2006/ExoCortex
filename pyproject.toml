@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=65.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exocortex"
+version = "0.1.0"
+description = "ExoCortex: Local-First JARVIS-like Autonomous Personal Computer Agent for Windows (Qualcomm Snapdragon AI Lab Challenge)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Aadesh Gund", email = "aadeshgund.2006@gmail.com" }
+]
+keywords = [
+    "autonomous-agent",
+    "windows-agent",
+    "snapdragon-npu",
+    "qualcomm-ai-hub",
+    "local-slm",
+    "onnx-runtime",
+    "computer-use"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "psutil>=5.9.0"
+]
+
+[project.optional-dependencies]
+onnx = [
+    "onnxruntime>=1.17.0"
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "flake8>=6.1.0"
+]
+
+[project.scripts]
+exocortex = "exocortex.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["exocortex*"]
