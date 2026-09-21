@@ -167,35 +167,43 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("Error: Please provide a prompt via positional argument or --prompt.")
         return 1
 
-    print(format_header("ExoCortex Autonomous Agent Execution"))
-    print(f"User Prompt: '{prompt}'\n")
-
     agent = ExoCortexAgent()
     result = agent.run(prompt)
+
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.success else 1
+
+    print(format_header("ExoCortex Autonomous Agent Execution"))
+    print(f"User Prompt: '{prompt}'\n")
 
     print(f"Execution Status: {'SUCCESS' if result.success else 'FAILED'}")
     print(f"Total Latency:    {result.total_latency_ms:.1f} ms")
     print(f"SLM Engine:       {result.slm_info.get('provider')} ({result.slm_info.get('model_name')})")
-    
-    if result.decision:
-        print("\n--- SLM Decision ---")
-        print(f"Intent:                 {result.decision.intent}")
-        print(f"Rationale:              {result.decision.thought_summary}")
-        print(f"Requires Confirmation:  {result.decision.requires_confirmation}")
-        if result.decision.steps:
-            tools_called = [s.tool for s in result.decision.steps]
-            print(f"Selected Tools:         {', '.join(tools_called)}")
 
-    if result.plan and result.plan.steps:
+    if result.trace and result.trace.steps:
+        print("\n--- Multi-Step Execution Trace ---")
+        for s in result.trace.steps:
+            if s.tool_name:
+                status_icon = "[OK]" if (s.tool_result and s.tool_result.success) else "[FAIL]"
+                print(f" {status_icon} Step {s.step_number}: {s.tool_name}({s.arguments}) -> {s.observation_text}")
+            else:
+                status_icon = "[DONE]" if s.status.value == "completed" else "[ERROR]"
+                print(f" {status_icon} Step {s.step_number}: {s.action_type.value} -> {s.observation_text or s.error_message}")
+
+    elif result.executed_tools:
         print("\n--- Executed Steps ---")
-        for step in result.plan.steps:
-            status_icon = "[OK]" if step.status.value == "completed" else "[FAIL]"
-            print(f" {status_icon} Step {step.step_id}: {step.description}")
-            if step.tool_name:
-                print(f"        Tool: {step.tool_name} -> {step.result or step.error}")
+        for t in result.executed_tools:
+            status_icon = "[OK]" if t["success"] else "[FAIL]"
+            print(f" {status_icon} Step {t['step_id']}: {t['tool']} -> {t['output'] or t['error']}")
 
-    print("\n--- Agent Response ---")
+    print("\n--- Final Agent Response ---")
     print(result.response_text)
+
+    if getattr(args, "trace", False) and result.trace:
+        print("\n--- Full Debug Trace (JSON) ---")
+        print(json.dumps(result.trace.to_dict(), indent=2))
+
     print("=" * 64 + "\n")
     return 0 if result.success else 1
 
@@ -269,9 +277,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     run_parser = subparsers.add_parser("run", help="Run a single natural language task")
     run_parser.add_argument("prompt", nargs="?", default="", help="Natural language prompt")
     run_parser.add_argument("--prompt", "-p", dest="prompt_flag", help="Natural language prompt")
+    run_parser.add_argument("--json", action="store_true", help="Output execution result in JSON format")
+    run_parser.add_argument("--trace", action="store_true", help="Display full multi-step execution trace")
     run_parser.set_defaults(
         func=lambda args: cmd_run(
-            argparse.Namespace(prompt=args.prompt_flag or args.prompt)
+            argparse.Namespace(
+                prompt=args.prompt_flag or args.prompt,
+                json=getattr(args, "json", False),
+                trace=getattr(args, "trace", False),
+            )
         )
     )
 

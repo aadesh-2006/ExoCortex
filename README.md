@@ -5,7 +5,10 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20ARM64%20%7C%20x64-blue.svg)](https://microsoft.com/windows)
 [![Qualcomm](https://img.shields.io/badge/Hardware-Snapdragon%20X%20Elite%20%7C%20NPU-FF6600.svg)](https://www.qualcomm.com/products/mobile/snapdragon)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Milestone%203-Completed-brightgreen.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20ARM64%20%7C%20x64-blue.svg)](https://microsoft.com/windows)
+[![Qualcomm](https://img.shields.io/badge/Hardware-Snapdragon%20X%20Elite%20%7C%20NPU-FF6600.svg)](https://www.qualcomm.com/products/mobile/snapdragon)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Milestone%204-Completed-brightgreen.svg)]()
 
 ---
 
@@ -37,26 +40,36 @@ ExoCortex is envisioned as a **JARVIS-like copilot for Windows**:
 
 ---
 
-## 4. Architecture & Cognitive Loop
+## 4. Architecture & Safe Agentic Execution Loop (Milestone 4)
 
-ExoCortex is designed with a decoupled, modular cognitive architecture:
+ExoCortex implements a bounded, safe, iterative cognitive loop:
 
 ```mermaid
 flowchart TD
-    User([User Natural Language Prompt]) --> CLI[ExoCortex CLI / Interface]
-    CLI --> AgentCore[Agent Cognitive Core]
+    User([User Natural Language Goal]) --> CLI[ExoCortex CLI / Interface]
+    CLI --> AgentCore[ExoCortexAgent Core]
+    AgentCore --> Executor[AgentExecutor Engine]
     
-    subgraph Cognitive Loop [Agent Cognitive Reasoning Pipeline]
-        AgentCore --> SLM[Local SLM Brain (Qwen2.5-0.5B / ONNX)]
-        SLM --> StructuredDec[Strict Structured Decision (AgentDecision Schema)]
+    subgraph Cognitive Loop [Multi-Step Cognitive Execution Loop]
+        Executor --> SLM[Local SLM Brain (Qwen2.5-0.5B ONNX)]
+        SLM --> StructuredDec[Strict Structured Decision (AgentDecision)]
         StructuredDec --> Validator[Schema & Tool Validator]
-        Validator --> ToolReg[Tool Selection & Permission Engine]
+        Validator --> LoopCheck{Loop / Step Limits OK?}
+        LoopCheck -- Exceeded --> StopLoop[Halt: MAX_STEPS / LOOP_DETECTED]
+        LoopCheck -- OK --> PermCheck{Permission & Confirmation Check}
+        PermCheck -- Requires Confirm --> PauseConfirm[Pause: CONFIRMATION_REQUIRED]
+        PermCheck -- Safe / Approved --> ToolReg[ToolRegistry.execute]
         ToolReg --> WinTools[Safe Windows OS Tool Suite]
         WinTools --> WinOS[Windows OS / Subsystems]
-        WinOS --> Observation[Observe Result & Telemetry]
-        Observation --> SLM
-        Observation --> TaskComplete([Task Completion])
+        WinOS --> Observation[Tool Observation (Bounded <= 2,000 Chars)]
+        Observation --> HistTracker[Append Step to Execution History]
+        HistTracker --> CheckGoal{Has More Steps?}
+        CheckGoal -- Yes --> SLM
+        CheckGoal -- No / Complete --> FinalResponse[Synthesize Final Response]
     end
+
+    FinalResponse --> Trace[ExecutionTrace Telemetry & Summary]
+    Trace --> UserOutput([User Output])
 
     subgraph Hardware Acceleration [Hardware Acceleration Layer]
         SLM --> HWDetect[Hardware Profile & NPU Detector]
@@ -66,8 +79,13 @@ flowchart TD
     end
 ```
 
-### Core Pipeline Flow:
-$$\text{User Prompt} \longrightarrow \text{Local SLM Brain} \longrightarrow \text{Structured Decision (JSON)} \longrightarrow \text{Tool Validation} \longrightarrow \text{Execution} \longrightarrow \text{Observation} \longrightarrow \text{Task Completion}$$
+### Cognitive Loop Guarantees:
+1. **Hard Step Bounding**: Hard-capped at `MAX_STEPS = 8` to prevent infinite execution chains.
+2. **Action Loop Detection**: Automatically terminates if an identical tool and argument set is executed more than `MAX_IDENTICAL_ACTIONS = 2` times.
+3. **Context Truncation**: Raw tool observation outputs are strictly bounded to `2,000` characters before injection into subsequent SLM prompts to prevent token explosion.
+4. **Single Gateway Enforcement**: 100% of tool executions strictly route through `ToolRegistry.execute()`. No backdoor execution paths exist.
+5. **Zero Dynamic Evaluation**: Absolutely zero `eval()`, `exec()`, `subprocess`, `__import__`, `os.system`, or shell strings in the executor.
+6. **Auditable Execution Trace**: Every execution step captures duration, status, arguments, and observations in an auditable `ExecutionTrace`.
 
 ---
 
@@ -90,14 +108,19 @@ The SLM **never** executes arbitrary PowerShell, CMD, or shell strings. Every OS
 
 ```
 exocortex/
+    execution/
+        __init__.py              # Execution engine exports
+        executor.py              # Multi-step cognitive loop engine
+        state.py                 # ExecutionState & ActionHistoryTracker
+        trace.py                 # ExecutionTrace telemetry recorder
     tools/
         windows/
-            __init__.py              # Windows tool suite exports
-            launch_application.py    # Allowlist application launcher
-            open_url.py              # Scheme-validated URL browser opener
-            filesystem.py            # Workspace-sandboxed file tools
-            processes.py             # Read-only process inspector
-            system.py                # Host & hardware diagnostics
+            __init__.py          # Windows tool suite exports
+            launch_application.py# Allowlist application launcher
+            open_url.py          # Scheme-validated URL browser opener
+            filesystem.py        # Workspace-sandboxed file tools
+            processes.py         # Read-only process inspector
+            system.py            # Host & hardware diagnostics
 ```
 
 ### Registered Windows Tools:
@@ -113,7 +136,7 @@ exocortex/
 
 ### Strict Security Boundaries:
 - ❌ **Zero Arbitrary Shell Execution**: No `cmd.exe /c`, `powershell -c`, or shell expansion (`shell=False` everywhere).
-- ❌ **Zero Destructive File Operations**: No file deletion, rename, move, or formatting in this milestone.
+- ❌ **Zero Destructive File Operations**: No file deletion, rename, move, or formatting.
 - ❌ **Zero Process Termination**: Process inspection is 100% read-only.
 - ❌ **Zero Unrestricted Filesystem Access**: Sandboxed to `~/.exocortex/workspace`. All paths are resolved and verified against the workspace root.
 - ❌ **Zero Dangerous URL Schemes**: `file://`, `javascript:`, `data:`, and local paths are rejected.
@@ -125,14 +148,15 @@ exocortex/
 > [!IMPORTANT]
 > **Hardware Status Note**: The development host is currently running on an **Intel x64 CPU** using `CPUExecutionProvider`. Snapdragon NPU / Hexagon acceleration via `QNNExecutionProvider` is architecturally supported and ready for Qualcomm Copilot+ PCs.
 
-| Feature / Subsystem | Current Status (Milestone 3) | Future Target (Snapdragon NPU) |
+| Feature / Subsystem | Current Status (Milestone 4) | Future Target (Snapdragon NPU) |
 | :--- | :--- | :--- |
 | **SLM Inference Engine** | ✅ **Active on CPU / DirectML** via `LocalSLMProvider` & `ONNXRuntimeSLMProvider` | 🚀 **Qualcomm Hexagon NPU** via `QNNExecutionProvider` |
+| **Agentic Cognitive Loop** | ✅ **Active**: Safe multi-step `AgentExecutor`, loop detection, observation feedback | 🚀 Proactive goal decomposition & background triggers |
 | **Tool Calling Pipeline** | ✅ **Active & Tested**: Strict JSON schema, dynamic tool prompting, validation & repair | 🚀 Expanded Windows UI Automation & Vision Tools |
 | **Windows Desktop Tools** | ✅ **Active**: App launcher, URL opener, workspace filesystem, process inspector | 🚀 Direct accessibility tree inspection & UI automation |
 | **Model Optimization** | ✅ **ONNX Runtime 1.18.0** local graph execution & quantization hooks | 🚀 **Qualcomm AI Hub** compiled INT4/W4A16 weights |
 | **Cloud Dependency** | ❌ **0% (Zero Cloud AI APIs)** | ❌ **0% (100% On-Device)** |
-| **Telemetry & Metrics** | ✅ **Active**: Model load time, latency (ms), tokens/sec, RAM usage | 🚀 NPU Power Draw (Watts) & Thermal Efficiency |
+| **Telemetry & Metrics** | ✅ **Active**: Step latency, tokens/sec, RAM, ExecutionTrace JSON export | 🚀 NPU Power Draw (Watts) & Thermal Efficiency |
 
 ---
 
@@ -146,15 +170,21 @@ exocortex/
   - [x] JSON extractor, validator, and malformed-output repair engine.
   - [x] Dynamic tool-aware prompt generator injecting registered tool schemas.
   - [x] Local inference benchmarking suite (`exocortex benchmark`).
-  - [x] 100% passing test suite.
 - [x] **Milestone 3 — Safe Windows Desktop & OS Automation**:
   - [x] Safe application launcher (`launch_application`) with strict allowlist.
   - [x] Validated URL opener (`open_url`) supporting `http`/`https`.
   - [x] Workspace-sandboxed filesystem tools (`list_directory`, `read_text_file`, `create_directory`).
   - [x] Read-only Windows process inspector (`list_processes`).
   - [x] Unified tool registry exposing all 9 tools to the SLM.
-  - [x] 61 comprehensive automated unit tests.
-- [ ] **Milestone 4 — Qualcomm AI Hub Integration & Snapdragon NPU Benchmarking**: QNN Execution Provider compilation and on-device HP Snapdragon benchmarks.
+- [x] **Milestone 4 — Safe Agentic Execution Loop**:
+  - [x] Safe multi-step execution loop (`AgentExecutor`) with observation feedback.
+  - [x] Hard limit enforcement (`MAX_STEPS = 8`).
+  - [x] Loop detection (`MAX_IDENTICAL_ACTIONS = 2`).
+  - [x] Context truncation bounding tool observations to 2,000 characters.
+  - [x] Structured `ExecutionTrace` with step breakdown and JSON export.
+  - [x] CLI `--trace` and `--json` support.
+  - [x] 72 passing automated unit tests across 11 test modules.
+- [ ] **Milestone 5 — Qualcomm AI Hub Integration & Snapdragon NPU Benchmarking**: QNN Execution Provider compilation and on-device HP Snapdragon benchmarks.
 
 ---
 
@@ -176,28 +206,23 @@ python -m exocortex.cli tools
 python -m exocortex.cli benchmark
 ```
 
-### Running Autonomous Desktop Tasks
+### Running Autonomous Multi-Step Desktop Tasks
 ```powershell
-# Launch an allowlisted desktop application
-python -m exocortex.cli run --prompt "Open Notepad"
+# Run a task with multi-step execution trace
+python -m exocortex.cli run --prompt "Open Notepad" --trace
 
-# Open a web address in default browser
-python -m exocortex.cli run --prompt "Open Google in my browser"
+# Run a task and output JSON trace
+python -m exocortex.cli run --prompt "Show me my running processes" --json
 
 # Inspect files in the safe workspace (~/.exocortex/workspace)
 python -m exocortex.cli run --prompt "List the files in my ExoCortex workspace"
 
 # Create a directory inside workspace
 python -m exocortex.cli run --prompt "Create a folder called research inside my workspace"
-
-# Inspect active processes
-python -m exocortex.cli run --prompt "Show me my running processes"
-
-# Inspect system hardware and memory
-python -m exocortex.cli run --prompt "Check my system information"
 ```
 
 ### Running the Test Suite
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
+

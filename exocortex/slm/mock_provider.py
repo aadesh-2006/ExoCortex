@@ -94,9 +94,70 @@ class MockSLMProvider(SLMProvider):
         return self.generate(prompt=prompt, temperature=temperature, max_tokens=max_tokens, **kwargs)
 
     def _simulate_reasoning(self, text: str) -> tuple[str, List[ToolCallRequest]]:
-        """Simulate realistic SLM intent parsing and structured tool decision."""
+        """Simulate realistic SLM intent parsing, multi-step agent decisions, and tool feedback."""
         lower = text.lower()
         tool_calls: List[ToolCallRequest] = []
+
+        # Handle multi-step execution loop observations
+        has_history = "previous actions and observations" in lower
+
+        # Check multi-step task: "Open Notepad and then tell me what processes..." or "Open Notepad and then list..."
+        is_notepad_and_process = ("notepad" in lower and ("process" in lower or "running" in lower))
+        is_notepad_and_list = ("notepad" in lower and ("list" in lower or "workspace" in lower or "file" in lower))
+
+        if has_history:
+            if is_notepad_and_process:
+                if "list_processes" in lower:
+                    doc = {
+                        "thought_summary": "Both Notepad launch and process listing completed.",
+                        "intent": "multi_step_completion",
+                        "steps": [],
+                        "requires_confirmation": False,
+                        "direct_response": "Notepad was launched and the list of active running processes was retrieved successfully.",
+                    }
+                    return json.dumps(doc), []
+                elif "launch_application" in lower:
+                    doc = {
+                        "thought_summary": "Notepad launched. Now inspecting running processes.",
+                        "intent": "process_inspection",
+                        "steps": [{"tool": "list_processes", "arguments": {}}],
+                        "requires_confirmation": False,
+                        "direct_response": None,
+                    }
+                    tool_calls.append(ToolCallRequest(tool_name="list_processes", arguments={}, call_id="call_proc_02"))
+                    return json.dumps(doc), tool_calls
+
+            if is_notepad_and_list:
+                if "list_directory" in lower:
+                    doc = {
+                        "thought_summary": "Both Notepad launch and directory listing completed.",
+                        "intent": "multi_step_completion",
+                        "steps": [],
+                        "requires_confirmation": False,
+                        "direct_response": "Notepad was launched and workspace files were listed successfully.",
+                    }
+                    return json.dumps(doc), []
+                elif "launch_application" in lower:
+                    doc = {
+                        "thought_summary": "Notepad launched. Now inspecting workspace files.",
+                        "intent": "filesystem_inspection",
+                        "steps": [{"tool": "list_directory", "arguments": {"path": ""}}],
+                        "requires_confirmation": False,
+                        "direct_response": None,
+                    }
+                    tool_calls.append(ToolCallRequest(tool_name="list_directory", arguments={"path": ""}, call_id="call_ls_02"))
+                    return json.dumps(doc), tool_calls
+
+            # For single-step tasks that have already completed an action in history
+            if "launch_application" in lower or "open_url" in lower or "list_directory" in lower or "read_text_file" in lower or "create_directory" in lower or "list_processes" in lower or "system_info" in lower or "health_check" in lower:
+                doc = {
+                    "thought_summary": "Previous action completed successfully. Task finished.",
+                    "intent": "task_completion",
+                    "steps": [],
+                    "requires_confirmation": False,
+                    "direct_response": "Task completed successfully based on tool observation.",
+                }
+                return json.dumps(doc), []
 
         if "health" in lower or "status" in lower or "diagnostics" in lower:
             doc = {
