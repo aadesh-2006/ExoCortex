@@ -53,6 +53,15 @@ class TestSLMProviders(unittest.TestCase):
         provider = get_slm_provider(config=cfg)
         self.assertIsInstance(provider, LocalServerSLMProvider)
 
+    def test_model_manager_status_accepts_small_config(self):
+        from exocortex.slm.model_manager import check_model_status
+        status = check_model_status("qwen2.5-0.5b-instruct")
+        self.assertTrue(status.is_ready)
+        self.assertTrue(status.files_present.get("config", False))
+        self.assertTrue(status.files_present.get("tokenizer", False))
+        self.assertTrue(status.files_present.get("model_onnx", False))
+        self.assertEqual(len(status.missing_files), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,7 +66,7 @@ def check_model_status(model_name: str = DEFAULT_MODEL_NAME) -> ModelStatus:
         dest_path = model_dir / dest_filename
         file_paths[key] = dest_path
 
-        if dest_path.exists() and dest_path.stat().st_size > 1000:
+        if dest_path.is_file() and dest_path.stat().st_size > 0:
             files_present[key] = True
             total_size += dest_path.stat().st_size
         else:
@@ -136,7 +136,7 @@ def download_model_assets(
         dest_path = model_dir / dest_filename
 
         # Skip if already present with valid size
-        if dest_path.exists() and dest_path.stat().st_size > 1000:
+        if dest_path.is_file() and dest_path.stat().st_size > 0:
             logger.info("File already present: %s", dest_filename)
             continue
 
