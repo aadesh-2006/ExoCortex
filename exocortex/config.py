@@ -40,11 +40,11 @@ class Settings:
 
     # SLM Settings
     slm_provider: SLMProviderType = field(
-        default_factory=lambda: os.getenv("EXOCORTEX_SLM_PROVIDER", "mock")  # type: ignore
+        default_factory=lambda: os.getenv("EXOCORTEX_SLM_PROVIDER", "local_slm")  # type: ignore
     )
     model_name: str = field(
         default_factory=lambda: os.getenv(
-            "EXOCORTEX_MODEL_NAME", "phi-3.5-mini-instruct"
+            "EXOCORTEX_MODEL_NAME", "qwen2.5-0.5b-instruct"
         )
     )
     model_path: str = field(

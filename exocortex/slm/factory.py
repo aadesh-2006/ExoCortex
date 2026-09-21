@@ -8,6 +8,7 @@ from typing import Optional
 
 from exocortex.config import Settings, get_config
 from exocortex.slm.base import SLMProvider
+from exocortex.slm.local_model_engine import LocalSLMProvider
 from exocortex.slm.local_provider import LocalServerSLMProvider
 from exocortex.slm.mock_provider import MockSLMProvider
 from exocortex.slm.onnx_provider import ONNXRuntimeSLMProvider
@@ -22,14 +23,20 @@ def get_slm_provider(
     Resolve and initialize an SLM provider instance.
     
     Args:
-        provider_type: Type of provider ('mock', 'onnx', 'local_server')
+        provider_type: Type of provider ('local_slm', 'onnx', 'mock', 'local_server')
         config: Application settings instance
         **kwargs: Additional parameters passed to the provider
     """
     cfg = config or get_config()
     target_type = (provider_type or cfg.slm_provider).lower()
 
-    if target_type == "mock":
+    if target_type in ("local_slm", "local", "qwen", "phi", "default"):
+        return LocalSLMProvider(
+            model_name=kwargs.get("model_name", cfg.model_name),
+            model_path=kwargs.get("model_path", cfg.model_path),
+            hardware_target=kwargs.get("hardware_target", cfg.hardware_target),
+        )
+    elif target_type == "mock":
         return MockSLMProvider(
             model_name=kwargs.get("model_name", cfg.model_name),
             canned_responses=kwargs.get("canned_responses"),
@@ -40,12 +47,16 @@ def get_slm_provider(
             model_name=kwargs.get("model_name", cfg.model_name),
             execution_provider=kwargs.get("hardware_target", cfg.hardware_target),
         )
-    elif target_type in ("local_server", "ollama", "local"):
+    elif target_type in ("local_server", "ollama"):
         return LocalServerSLMProvider(
             base_url=kwargs.get("local_server_url", cfg.local_server_url),
             model_name=kwargs.get("model_name", cfg.model_name),
             api_key=kwargs.get("local_server_api_key", cfg.local_server_api_key),
         )
     else:
-        # Default fallback to mock provider
-        return MockSLMProvider(model_name=cfg.model_name)
+        # Default to real local SLM provider
+        return LocalSLMProvider(
+            model_name=cfg.model_name,
+            model_path=cfg.model_path,
+            hardware_target=cfg.hardware_target,
+        )

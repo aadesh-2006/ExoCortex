@@ -5,7 +5,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20ARM64%20%7C%20x64-blue.svg)](https://microsoft.com/windows)
 [![Qualcomm](https://img.shields.io/badge/Hardware-Snapdragon%20X%20Elite%20%7C%20NPU-FF6600.svg)](https://www.qualcomm.com/products/mobile/snapdragon)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Milestone%201-Completed-brightgreen.svg)]()
+[![Status](https://img.shields.io/badge/Milestone%202-Completed-brightgreen.svg)]()
 
 ---
 
@@ -13,7 +13,7 @@
 
 **ExoCortex** is an autonomous, local-first personal computer assistant engineered specifically for **Windows** and optimized for **Qualcomm Snapdragon-powered Copilot+ PCs** (such as HP Snapdragon laptops). 
 
-Unlike cloud-dependent conversational bots, ExoCortex functions as an intelligent cognitive layer residing directly on the user's computer. It receives natural-language user intentions, formulates multi-step execution plans, interacts with the Windows OS, observes the resulting state, and autonomously drives tasks to completion—all while keeping user data 100% private and on-device.
+Unlike cloud-dependent conversational bots, ExoCortex functions as an intelligent cognitive layer residing directly on the user's computer. It receives natural-language user intentions, formulates structured multi-step execution plans, interacts with the Windows OS, observes the resulting state, and autonomously drives tasks to completion—all while keeping user data 100% private and on-device.
 
 ---
 
@@ -46,11 +46,11 @@ flowchart TD
     CLI --> AgentCore[Agent Cognitive Core]
     
     subgraph Cognitive Loop [Agent Cognitive Reasoning Pipeline]
-        AgentCore --> SLM[SLM Inference Engine]
-        SLM --> Intent[Intent Understanding & Entity Parsing]
-        Intent --> Planner[Agent Planner & Task Decomposition]
-        Planner --> ToolSel[Tool Selection & Permission Validator]
-        ToolSel --> Action[Execution Engine]
+        AgentCore --> SLM[Local SLM Brain (Qwen2.5-0.5B / ONNX)]
+        SLM --> StructuredDec[Strict Structured Decision (AgentDecision Schema)]
+        StructuredDec --> Validator[Schema & Tool Validator]
+        Validator --> ToolReg[Tool Selection & Permission Engine]
+        ToolReg --> Action[Execution Engine]
         Action --> WinOS[Windows OS Subsystems / UI Automation]
         WinOS --> Observation[Observe Result & Telemetry]
         Observation --> SLM
@@ -59,108 +59,130 @@ flowchart TD
 
     subgraph Hardware Acceleration [Hardware Acceleration Layer]
         SLM --> HWDetect[Hardware Profile & NPU Detector]
-        HWDetect --> QNN[ONNX Runtime QNN (Qualcomm Hexagon NPU)]
+        HWDetect --> QNN[ONNX Runtime QNN (Qualcomm Hexagon NPU - Planned)]
         HWDetect --> DML[DirectML / GPU Neural Accelerator]
-        HWDetect --> LocalSLM[Local SLM Providers: ONNX / GGUF / Ollama / Mock]
+        HWDetect --> CPUFallback[CPU Execution Provider (Active Dev Fallback)]
     end
 ```
 
 ### Core Pipeline Flow:
-$$\text{User Prompt} \longrightarrow \text{SLM Reasoning} \longrightarrow \text{Intent Understanding} \longrightarrow \text{Agent Planner} \longrightarrow \text{Tool Selection} \longrightarrow \text{Computer Interaction} \longrightarrow \text{Observation} \longrightarrow \text{Reason Again} \longrightarrow \text{Task Completion}$$
+$$\text{User Prompt} \longrightarrow \text{Local SLM Brain} \longrightarrow \text{Structured Decision (JSON)} \longrightarrow \text{Tool Validation} \longrightarrow \text{Execution} \longrightarrow \text{Observation} \longrightarrow \text{Task Completion}$$
 
 ---
 
-## 5. Core Principles
+## 5. Model Selection & Rationale (Milestone 2)
 
-1. **Local-First AI**: All core reasoning, intent classification, and tool dispatching execute on-device. No cloud AI API keys are required.
-2. **SLMs as Primary Reasoning Layer**: Powered by efficient Small Language Models (e.g., *Phi-3.5-mini*, *Llama-3.2-3B*, *Qwen2.5-Coder-3B/7B*).
-3. **Data Privacy & User Sovereignty**: Personal files, notes, emails, and desktop interactions never leave the user's machine.
-4. **First-Class Snapdragon NPU Strategy**: Designed from inception to leverage **Qualcomm AI Hub** and **ONNX Runtime QNN Execution Provider** on Snapdragon X Elite and Snapdragon X Plus architectures.
-5. **Windows-Native Foundation**: Tailored specifically for Windows 11 subsystems, UI Automation, PowerShell, and native APIs.
-6. **Safety & Permission Guardrails**: Explicit permission levels (`SAFE`, `CONFIRMATION_REQUIRED`, `RESTRICTED`) to prevent unauthorized destructive operations.
+For the core reasoning brain, we evaluated practical open-source SLM candidates:
+
+| Candidate Model | Parameter Count | RAM Footprint | JSON / Tool Calling | License | Assessment for ExoCortex MVP |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Qwen2.5-0.5B-Instruct** | **490M** | **~350 MB** | **Excellent** | **Apache 2.0** | **Selected Primary MVP Model**: Ultra-compact, sub-second CPU latency, zero memory pressure. |
+| **Qwen2.5-1.5B-Instruct** | 1.54B | ~900 MB | Exceptional | Apache 2.0 | High-accuracy tier for complex multi-step reasoning. |
+| **Phi-3.5-mini-instruct** | 3.82B | ~2.5 GB (INT4) | Very Good | MIT | Supported via ONNX provider for higher-capacity hosts. |
+| **Llama-3.2-1B-Instruct** | 1.23B | ~800 MB | Good | Llama Community | Strong baseline; custom license constraints. |
+
+### Why `Qwen2.5-0.5B-Instruct` was Selected:
+1. **Ultra-Low Resource Footprint**: At ~350MB, it runs entirely in physical RAM with zero disk swapping, leaving system memory free for user applications.
+2. **Deterministic Structured JSON Adherence**: Excellent instruction-following on strict schema constraints, avoiding markdown hallucinations.
+3. **Hardware & Qualcomm Compatibility**: Supported by Qualcomm AI Hub compilation tools and ONNX Runtime execution providers.
+4. **Fast Local CPU Fallback**: Generates tokens at high speed on standard developer laptops without requiring discrete Nvidia GPUs or cloud APIs.
+5. **Permissive Licensing**: Apache 2.0 allows unrestricted research, benchmarking, and deployment.
 
 ---
 
-## 6. Snapdragon & NPU Strategy
+## 6. Structured Tool-Calling Architecture
 
-ExoCortex avoids retrofitting hardware acceleration after the fact by treating NPU acceleration as a core architectural layer:
+The local SLM does not produce arbitrary conversational text when performing computer tasks. It emits strict JSON conforming to the `AgentDecision` schema:
 
-| Component | Target Technology | Purpose |
+```json
+{
+  "thought_summary": "Short 1-2 sentence action rationale (no hidden chain-of-thought)",
+  "intent": "hardware_inspection",
+  "steps": [
+    {
+      "tool": "system_info",
+      "arguments": {
+        "detail_level": "full"
+      }
+    }
+  ],
+  "requires_confirmation": false,
+  "direct_response": null
+}
+```
+
+### Key Safety & Parsing Features:
+- **No Hidden Chain-of-Thought**: SLM generates only a concise, user-auditable `thought_summary`.
+- **Dynamic Tool-Aware Prompting**: System prompt dynamically injects schemas, parameter types, and permission levels of all tools currently registered in `ToolRegistry`.
+- **Robust JSON Extraction & Repair**: Extracts JSON from codeblocks or raw text; heuristically repairs trailing commas and missing braces.
+- **Unknown Tool Rejection**: Strictly rejects hallucinated or unregistered tool requests before execution.
+- **Permission Elevation**: Automatically flags `requires_confirmation = true` whenever a tool requires user approval (`CONFIRMATION_REQUIRED` or `RESTRICTED`).
+
+---
+
+## 7. Implementation Status: Current vs. Snapdragon Roadmap
+
+> [!IMPORTANT]
+> **Strict Verification Guarantee**: We explicitly distinguish what is currently running on the development machine from what is architected for future Snapdragon hardware.
+
+| Feature / Subsystem | Current Status (Milestone 2) | Future Target (Snapdragon NPU) |
 | :--- | :--- | :--- |
-| **Model Optimization** | **Qualcomm AI Hub** | Quantized & compiled SLM models (INT4/W4A16) tailored for Snapdragon X Series. |
-| **Inference Engine** | **ONNX Runtime (QNN EP)** | Direct execution on Qualcomm Hexagon NPU with zero CPU/GPU overhead. |
-| **Windows Fallback** | **DirectML Execution Provider** | Accelerated execution on Windows AI-capable hardware. |
-| **Host Architecture** | **Windows on ARM (ARM64)** | Native ARM64 compilation and execution on Snapdragon-powered HP PCs. |
+| **SLM Inference Engine** | ✅ **Active on CPU / DirectML** via `LocalSLMProvider` & `ONNXRuntimeSLMProvider` | 🚀 **Qualcomm Hexagon NPU** via `QNNExecutionProvider` |
+| **Tool Calling Pipeline** | ✅ **Active & Tested**: Strict JSON schema, dynamic tool prompting, validation & repair | 🚀 Expanded Windows UI Automation & Vision Tools |
+| **Model Optimization** | ✅ **ONNX Runtime 1.18.0** local graph execution & quantization hooks | 🚀 **Qualcomm AI Hub** compiled INT4/W4A16 weights |
+| **Cloud Dependency** | ❌ **0% (Zero Cloud AI APIs)** | ❌ **0% (100% On-Device)** |
+| **Telemetry & Metrics** | ✅ **Active**: Model load time, latency (ms), tokens/sec, RAM usage | 🚀 NPU Power Draw (Watts) & Thermal Efficiency |
 
 ---
 
-## 7. Planned Capabilities
+## 8. Milestone Status Tracker
 
-- [x] **Milestone 1**: Core foundation, hardware detector, SLM abstractions, cognitive loop skeleton, tool registry, diagnostics probe, CLI.
-- [ ] **Milestone 2**: Local SLM integration (Phi-3.5-mini / Qwen2.5 via ONNX/GGUF), structured function-calling parser.
-- [ ] **Milestone 3**: Windows Desktop & File System Tools (file search, app launcher, process manager, safe PowerShell dispatcher).
-- [ ] **Milestone 4**: Qualcomm AI Hub model integration & Snapdragon NPU benchmarking (QNN Execution Provider).
-- [ ] **Milestone 5**: Windows UI Automation & Vision-guided computer interaction.
-- [ ] **Milestone 6**: Multi-turn proactive autonomous workflows (desktop organization, email drafts, calendar reminders).
-
----
-
-## 8. Milestone 1 Status — Completed ✅
-
-### Deliverables Accomplished:
-- [x] Clean, modular project structure with packaging (`pyproject.toml`, `requirements.txt`).
-- [x] Central configuration and environment handling (`exocortex/config.py`, `.env.example`).
-- [x] Hardware discovery module detecting Snapdragon NPU, DirectML, QNN EP, and host telemetry (`exocortex/hardware.py`).
-- [x] Decoupled SLM Provider interface with Mock, ONNX Runtime, and Local Server adapters (`exocortex/slm/`).
-- [x] Safety-gated Tool Registry with permission levels and built-in foundation tools (`exocortex/tools/`).
-- [x] Complete cognitive loop orchestrator (`exocortex/agent.py`, `exocortex/intent.py`, `exocortex/planner.py`).
-- [x] Health check & system diagnostics probe (`exocortex/health.py`).
-- [x] Full-featured CLI with status, hardware, and task execution commands (`exocortex/cli.py`).
-- [x] 100% passing unit test suite (`tests/`).
+- [x] **Milestone 1 — Foundation**: Modular agent skeleton, configuration manager, hardware discovery, tool sandbox, status probe, Windows CLI.
+- [x] **Milestone 2 — Local SLM Brain & Structured Tool Calling**:
+  - [x] Evaluation and selection of `Qwen2.5-0.5B-Instruct` as primary MVP model.
+  - [x] Local SLM provider (`LocalSLMProvider`) with zero cloud API dependencies.
+  - [x] Strict structured response format (`AgentDecision`, `StructuredStep`).
+  - [x] JSON extractor, validator, and malformed-output repair engine.
+  - [x] Dynamic tool-aware prompt generator injecting registered tool schemas.
+  - [x] Local inference benchmarking suite (`exocortex benchmark`).
+  - [x] 100% passing test suite (31 automated unit tests).
+- [ ] **Milestone 3 — Windows OS Desktop & File System Automation**: Windows UI Automation, safe file operations, application launcher.
+- [ ] **Milestone 4 — Qualcomm AI Hub Integration & Snapdragon NPU Benchmarking**: QNN Execution Provider compilation and on-device HP Snapdragon benchmarks.
 
 ---
 
-## 9. Quickstart Guide
+## 9. Quickstart & CLI Commands
 
 ### Prerequisites
 - Python 3.11 or 3.12
 - Windows 11 (ARM64 Snapdragon or x64)
 
-### Installation
-```powershell
-# Clone or navigate to the repository
-cd C:\Users\Aadesh\.gemini\antigravity\scratch\ExoCortex
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Running System Health & Diagnostics
+### Running System Status Check
 ```powershell
 python -m exocortex.cli status
 ```
 
-### Inspecting Snapdragon NPU & Hardware Profile
+### Running Local SLM Inference Benchmarks
 ```powershell
-python -m exocortex.cli hardware
+python -m exocortex.cli benchmark
 ```
 
-### Running an Autonomous Agent Task
+### Running Autonomous Tool-Calling Agent
 ```powershell
-python -m exocortex.cli run --prompt "Check system status and hardware capabilities"
+# Tool-calling prompt (triggers system_info tool)
+python -m exocortex.cli run --prompt "Check my system information"
+
+# Health diagnostics prompt (triggers health_check tool)
+python -m exocortex.cli run --prompt "Run diagnostics on system health"
+
+# Conversational prompt (no tool required)
+python -m exocortex.cli run --prompt "Hello who are you?"
+
+# Sensitive action prompt (triggers requires_confirmation)
+python -m exocortex.cli run --prompt "Delete all files in C drive"
 ```
 
-### Running Automated Tests
+### Running the Test Suite
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
-
----
-
-## 10. Next Milestone (Milestone 2)
-
-**Milestone 2 Target**: Local SLM Model Engine & Structured Function-Calling
-1. Integrate local quantized SLM weights (*Phi-3.5-mini-instruct* / *Qwen2.5-Coder*).
-2. Wire ONNX Runtime model inference pipeline with tokenizer and generation loop.
-3. Implement JSON-schema based function calling parser for local SLM outputs.
-4. Add model latency and token-per-second benchmarking utilities.

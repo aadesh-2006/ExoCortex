@@ -13,8 +13,8 @@ class TestConfig(unittest.TestCase):
     def test_default_settings(self):
         settings = Settings()
         self.assertEqual(settings.env, "development")
-        self.assertEqual(settings.slm_provider, "mock")
-        self.assertEqual(settings.model_name, "phi-3.5-mini-instruct")
+        self.assertEqual(settings.slm_provider, "local_slm")
+        self.assertEqual(settings.model_name, "qwen2.5-0.5b-instruct")
         self.assertEqual(settings.hardware_target, "auto")
         self.assertTrue(settings.require_confirmation_for_sensitive)
         self.assertEqual(settings.max_plan_steps, 10)
@@ -27,7 +27,7 @@ class TestConfig(unittest.TestCase):
         d.rmdir()
 
     def test_get_config_singleton(self):
-        cfg1 = get_config()
+        cfg1 = get_config(reload=True)
         cfg2 = get_config()
         self.assertIs(cfg1, cfg2)
 

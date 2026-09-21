@@ -1,8 +1,8 @@
 """
 Command-line interface (CLI) for ExoCortex.
 
-Entry point for running diagnostics, inspecting Snapdragon hardware acceleration,
-and invoking autonomous agent tasks.
+Entry point for running diagnostics, hardware inspection, local SLM benchmarking,
+and executing autonomous agent tasks on Windows.
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from typing import List, Optional
 
 import exocortex
 from exocortex.agent import ExoCortexAgent
+from exocortex.benchmarking import run_benchmark
 from exocortex.config import get_config
 from exocortex.hardware import detect_hardware
 from exocortex.health import run_health_check
-
 
 try:
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -49,15 +49,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     hw = report.hardware
     print(f"  OS:                 {hw['os_name']} {hw['os_release']} ({hw['architecture']})")
     print(f"  Processor:          {hw['processor_name']}")
-    print(f"  Snapdragon NPU:     {'Detected' if hw['is_snapdragon_detected'] else 'Not Detected (Emulation Ready)'}")
+    print(f"  Snapdragon NPU:     {'Detected' if hw['is_snapdragon_detected'] else 'Not Detected (CPU Emulation / DirectML)'}")
     print(f"  Recommended EP:     {hw['recommended_execution_provider']}")
     print(f"  Memory (RAM):       {hw['available_memory_gb']:.1f} GB available / {hw['total_memory_gb']:.1f} GB total")
 
-    print("\n[SLM Inference Provider]")
+    print("\n[SLM Inference Engine]")
     slm = report.slm_provider
     print(f"  Provider:           {slm.get('provider')}")
     print(f"  Model Name:         {slm.get('model_name')}")
-    print(f"  Local Only:         {slm.get('is_local')}")
+    print(f"  Execution Mode:     {slm.get('execution_provider', 'Local')}")
+    print(f"  NPU Accelerated:    {slm.get('is_npu_accelerated', False)}")
+    print(f"  Local Only:         {slm.get('is_local', True)}")
 
     print("\n[Tool Registry]")
     print(f"  Active Tools:       {', '.join(report.registered_tools)}")
@@ -93,11 +95,41 @@ def cmd_hardware(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Run local SLM inference benchmarks and display performance metrics."""
+    print(format_header("ExoCortex Local SLM Inference Benchmark"))
+    print("Running on-device inference performance suite...\n")
+
+    res = run_benchmark()
+
+    if args.json:
+        print(json.dumps(res.to_dict(), indent=2))
+        return 0
+
+    print(f"Model Name:              {res.model_name}")
+    print(f"Execution Provider:      {res.execution_provider}")
+    print(f"NPU Accelerated:         {res.is_npu_accelerated}")
+    print(f"Benchmark Iterations:    {res.iterations}")
+    print(f"Avg Total Latency:       {res.avg_total_latency_ms:.2f} ms")
+    print(f"Avg Generation Latency:  {res.avg_generation_latency_ms:.2f} ms")
+    print(f"Avg Inference Speed:     {res.avg_tokens_per_second:.1f} tokens/sec")
+    print(f"Total Tokens Generated:  {res.total_tokens_generated}")
+    print(f"Process Peak RAM:        {res.peak_ram_mb:.1f} MB")
+
+    print("\n--- Iteration Breakdown ---")
+    for r in res.runs:
+        print(f" Run #{r['run_index']}: {r['latency_ms']:.1f} ms | {r['completion_tokens']} tokens | {r['tokens_per_second']:.1f} tok/s | RAM: {r['ram_mb']:.1f} MB")
+        print(f"   Prompt: '{r['prompt']}'")
+
+    print("=" * 64 + "\n")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run an autonomous agent task with natural language prompt."""
     prompt = args.prompt
     if not prompt:
-        print("Error: Please provide a prompt via --prompt or positional argument.")
+        print("Error: Please provide a prompt via positional argument or --prompt.")
         return 1
 
     print(format_header("ExoCortex Autonomous Agent Execution"))
@@ -110,12 +142,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Total Latency:    {result.total_latency_ms:.1f} ms")
     print(f"SLM Engine:       {result.slm_info.get('provider')} ({result.slm_info.get('model_name')})")
     
-    print("\n--- Plan Breakdown ---")
-    for step in result.plan.steps:
-        status_icon = "[OK]" if step.status.value == "completed" else "[FAIL]"
-        print(f" {status_icon} Step {step.step_id}: {step.description}")
-        if step.tool_name:
-            print(f"        Tool: {step.tool_name}")
+    if result.decision:
+        print("\n--- SLM Decision ---")
+        print(f"Intent:                 {result.decision.intent}")
+        print(f"Rationale:              {result.decision.thought_summary}")
+        print(f"Requires Confirmation:  {result.decision.requires_confirmation}")
+        if result.decision.steps:
+            tools_called = [s.tool for s in result.decision.steps]
+            print(f"Selected Tools:         {', '.join(tools_called)}")
+
+    if result.plan and result.plan.steps:
+        print("\n--- Executed Steps ---")
+        for step in result.plan.steps:
+            status_icon = "[OK]" if step.status.value == "completed" else "[FAIL]"
+            print(f" {status_icon} Step {step.step_id}: {step.description}")
+            if step.tool_name:
+                print(f"        Tool: {step.tool_name} -> {step.result or step.error}")
 
     print("\n--- Agent Response ---")
     print(result.response_text)
@@ -173,6 +215,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     hw_parser = subparsers.add_parser("hardware", help="Inspect hardware and Snapdragon acceleration")
     hw_parser.add_argument("--json", action="store_true", help="Output hardware profile in JSON format")
     hw_parser.set_defaults(func=cmd_hardware)
+
+    # Benchmark command
+    bench_parser = subparsers.add_parser("benchmark", help="Run local SLM inference benchmarks")
+    bench_parser.add_argument("--json", action="store_true", help="Output benchmark results in JSON format")
+    bench_parser.set_defaults(func=cmd_benchmark)
 
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a single natural language task")
