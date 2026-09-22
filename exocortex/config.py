@@ -57,6 +57,12 @@ class Settings:
     )
 
     # Hardware & Snapdragon Acceleration
+    execution_provider: str = field(
+        default_factory=lambda: os.getenv(
+            "EXOCORTEX_EXECUTION_PROVIDER",
+            os.getenv("EXOCORTEX_HARDWARE_TARGET", "auto"),
+        )
+    )
     hardware_target: HardwareTarget = field(
         default_factory=lambda: os.getenv("EXOCORTEX_HARDWARE_TARGET", "auto")  # type: ignore
     )

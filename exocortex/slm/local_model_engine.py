@@ -92,8 +92,6 @@ class LocalSLMProvider(SLMProvider):
     ) -> None:
         self.model_name = model_name
         self.hardware_target = hardware_target
-        self.hardware_profile = detect_hardware()
-        self.resolved_provider = self._resolve_provider()
         self.last_metrics: Optional[LocalInferenceMetrics] = None
         self.generator: Optional[ONNXNeuralGenerator] = None
 
@@ -112,22 +110,24 @@ class LocalSLMProvider(SLMProvider):
         model_file = Path(model_path) if model_path else status.file_paths["model_onnx"]
         tok_file = status.file_paths["tokenizer"]
 
-        # Instantiate real ONNX neural generator
+        # Instantiate real ONNX neural generator with hardware-aware dispatch
         self.generator = ONNXNeuralGenerator(
             model_path=model_file,
             tokenizer_path=tok_file,
-            execution_provider=self.resolved_provider,
+            execution_provider=self.hardware_target,
         )
 
-    def _resolve_provider(self) -> str:
-        """Resolve active ONNX / hardware execution provider."""
-        if self.hardware_target == "qnn":
-            return "QNNExecutionProvider"
-        elif self.hardware_target == "dml":
-            return "DmlExecutionProvider"
-        elif self.hardware_target == "cpu":
-            return "CPUExecutionProvider"
-        return self.hardware_profile.recommended_execution_provider
+    @property
+    def resolved_provider(self) -> str:
+        return self.active_provider
+
+    @property
+    def active_provider(self) -> str:
+        return self.generator.active_provider if self.generator else "CPUExecutionProvider"
+
+    @property
+    def is_npu_active(self) -> bool:
+        return self.generator.is_npu_active if self.generator else False
 
     def is_available(self) -> bool:
         """Check if real model and ONNX session are loaded and ready."""
@@ -135,15 +135,36 @@ class LocalSLMProvider(SLMProvider):
 
     def get_model_info(self) -> Dict[str, Any]:
         load_time = self.generator.load_time_ms if self.generator else 0.0
+        model_size_mb = 0.0
+        if self.generator and self.generator.model_path.exists():
+            model_size_mb = self.generator.model_path.stat().st_size / (1024 * 1024)
+
+        from exocortex.runtime.provider import RuntimeDispatcher
+        runtime_prof = RuntimeDispatcher.get_runtime_profile(
+            requested_target=self.hardware_target,
+            active_provider=self.active_provider,
+            is_npu_active=self.is_npu_active,
+            fallback_occurred=self.generator.fallback_occurred if self.generator else False,
+            fallback_reason=self.generator.fallback_reason if self.generator else None,
+        )
+
         return {
             "model_name": self.model_name,
             "provider": "LocalSLMProvider (Real ONNX Neural Engine)",
-            "execution_provider": self.resolved_provider,
-            "is_npu_accelerated": self.resolved_provider == "QNNExecutionProvider",
+            "requested_provider": self.hardware_target,
+            "selected_provider": self.generator.selected_provider if self.generator else "CPUExecutionProvider",
+            "execution_provider": self.active_provider,
+            "is_npu_accelerated": self.is_npu_active,
             "is_local": True,
             "is_mock": False,
             "model_path": str(self.generator.model_path) if self.generator else None,
+            "model_size_mb": round(model_size_mb, 1),
+            "quantization": "INT8 (Static / Dynamic Quantized)",
+            "inference_backend": "ONNX Runtime",
             "load_time_ms": round(load_time, 2),
+            "fallback_occurred": self.generator.fallback_occurred if self.generator else False,
+            "fallback_reason": self.generator.fallback_reason if self.generator else None,
+            "runtime_profile": runtime_prof.to_dict(),
         }
 
     def generate(
@@ -176,8 +197,8 @@ class LocalSLMProvider(SLMProvider):
         # Record real telemetry metrics
         self.last_metrics = LocalInferenceMetrics(
             model_name=self.model_name,
-            execution_provider=self.resolved_provider,
-            is_npu_accelerated=self.resolved_provider == "QNNExecutionProvider",
+            execution_provider=self.active_provider,
+            is_npu_accelerated=self.is_npu_active,
             model_load_time_ms=self.generator.load_time_ms,
             prompt_latency_ms=gen_out.prompt_latency_ms,
             generation_latency_ms=gen_out.generation_latency_ms,

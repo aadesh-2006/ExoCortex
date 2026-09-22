@@ -49,11 +49,16 @@ class ONNXNeuralGenerator:
         self,
         model_path: Path,
         tokenizer_path: Path,
-        execution_provider: str = "CPUExecutionProvider",
+        execution_provider: str = "auto",
     ) -> None:
         self.model_path = model_path
         self.tokenizer_path = tokenizer_path
-        self.execution_provider = execution_provider
+        self.requested_provider = execution_provider
+        self.selected_provider = "CPUExecutionProvider"
+        self.active_provider = "CPUExecutionProvider"
+        self.is_npu_active = False
+        self.fallback_occurred = False
+        self.fallback_reason: Optional[str] = None
         self.session: Optional[ort.InferenceSession] = None
         self.tokenizer: Optional[Tokenizer] = None
         self.is_loaded = False
@@ -62,7 +67,7 @@ class ONNXNeuralGenerator:
         self.load()
 
     def load(self) -> None:
-        """Load ONNX inference session and tokenizer into memory."""
+        """Load ONNX inference session and tokenizer into memory with hardware-aware dispatch."""
         start_time = time.perf_counter()
 
         if not self.model_path.exists():
@@ -78,27 +83,56 @@ class ONNXNeuralGenerator:
         # 1. Load Tokenizer
         self.tokenizer = Tokenizer.from_file(str(self.tokenizer_path))
 
-        # 2. Load ONNX Session
+        # 2. Resolve target execution provider
+        from exocortex.runtime.provider import RuntimeDispatcher
+        resolved_ep, warning_reason = RuntimeDispatcher.resolve_provider(self.requested_provider)
+        self.selected_provider = resolved_ep
+
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         opts.intra_op_num_threads = min(os.cpu_count() or 4, 8)
 
-        providers = [self.execution_provider]
-        if self.execution_provider != "CPUExecutionProvider":
-            providers.append("CPUExecutionProvider")
+        # 3. Attempt session creation with requested/selected provider
+        providers_to_try = [self.selected_provider]
+        if self.selected_provider != "CPUExecutionProvider":
+            providers_to_try.append("CPUExecutionProvider")
 
-        self.session = ort.InferenceSession(
-            str(self.model_path),
-            sess_options=opts,
-            providers=providers,
-        )
+        try:
+            self.session = ort.InferenceSession(
+                str(self.model_path),
+                sess_options=opts,
+                providers=providers_to_try,
+            )
+            self.active_provider = self.session.get_providers()[0]
+        except Exception as init_err:
+            logger.warning(
+                "Failed to initialize ONNX session with provider %s: %s. Falling back to CPUExecutionProvider.",
+                providers_to_try,
+                init_err,
+            )
+            self.fallback_occurred = True
+            self.fallback_reason = f"Provider initialization failed: {init_err}"
+            self.session = ort.InferenceSession(
+                str(self.model_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+            self.active_provider = "CPUExecutionProvider"
 
+        # Check if ONNX Runtime itself downgraded to CPU
+        if self.selected_provider != "CPUExecutionProvider" and self.active_provider == "CPUExecutionProvider":
+            self.fallback_occurred = True
+            if not self.fallback_reason:
+                self.fallback_reason = f"{self.selected_provider} was not active; ONNX Runtime selected CPUExecutionProvider."
+
+        self.is_npu_active = (self.active_provider == "QNNExecutionProvider")
         self.load_time_ms = (time.perf_counter() - start_time) * 1000
         self.is_loaded = True
         logger.info(
-            "Loaded Qwen2.5-0.5B ONNX session in %.1f ms with provider: %s",
+            "Loaded Qwen2.5-0.5B ONNX session in %.1f ms with active provider: %s (NPU active: %s)",
             self.load_time_ms,
-            self.session.get_providers()[0],
+            self.active_provider,
+            self.is_npu_active,
         )
 
     def format_chatml(self, user_prompt: str, system_prompt: Optional[str] = None) -> str:

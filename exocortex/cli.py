@@ -33,9 +33,12 @@ def format_header(title: str) -> str:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Run health check and print system status."""
+    """Run health check and print system status with runtime dispatch details."""
     report = run_health_check()
     config = get_config()
+    slm = report.slm_provider
+    hw = report.hardware
+    runtime_prof = slm.get("runtime_profile", {})
     
     if args.json:
         data = report.to_dict()
@@ -43,30 +46,39 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(json.dumps(data, indent=2))
         return 0
 
-    print(format_header(f"ExoCortex v{report.version} - System Status"))
+    print(format_header(f"ExoCortex v{report.version} - System & Runtime Status"))
     status_symbol = "[OK]" if report.status == "healthy" else "[WARN]"
     print(f"Overall Status: {status_symbol} {report.status.upper()}")
     print(f"Python Runtime: {report.python_version}")
     print(f"Workspace Dir:  {config.workspace_dir}")
     
-    print("\n[Hardware & Acceleration]")
-    hw = report.hardware
-    print(f"  OS:                 {hw['os_name']} {hw['os_release']} ({hw['architecture']})")
-    print(f"  Processor:          {hw['processor_name']}")
-    print(f"  Snapdragon NPU:     {'Detected' if hw['is_snapdragon_detected'] else 'Not Detected (CPU Emulation / DirectML)'}")
-    print(f"  Recommended EP:     {hw['recommended_execution_provider']}")
-    print(f"  Memory (RAM):       {hw['available_memory_gb']:.1f} GB available / {hw['total_memory_gb']:.1f} GB total")
+    print("\n[Hardware & Host System]")
+    print(f"  OS:                     {hw['os_name']} {hw['os_release']} ({hw['architecture']})")
+    print(f"  Processor:              {hw['processor_name']}")
+    print(f"  ARM64 Native:           {hw.get('is_arm64', False)}")
+    print(f"  Snapdragon CPU:         {'Detected' if hw['is_snapdragon_detected'] else 'Not Detected'}")
+    print(f"  Memory (RAM):           {hw['available_memory_gb']:.1f} GB available / {hw['total_memory_gb']:.1f} GB total")
 
-    print("\n[SLM Inference Engine]")
-    slm = report.slm_provider
-    print(f"  Provider:           {slm.get('provider')}")
-    print(f"  Model Name:         {slm.get('model_name')}")
-    print(f"  Execution Mode:     {slm.get('execution_provider', 'Local')}")
-    print(f"  NPU Accelerated:    {slm.get('is_npu_accelerated', False)}")
-    print(f"  Local Only:         {slm.get('is_local', True)}")
+    print("\n[ONNX Runtime & Hardware Acceleration]")
+    print(f"  ONNX Runtime Version:   {runtime_prof.get('onnxruntime_version', '1.18.0')}")
+    print(f"  Available Providers:    {', '.join(runtime_prof.get('available_providers', hw.get('available_execution_providers', [])))}")
+    print(f"  Configured Target:      {config.execution_provider}")
+    print(f"  Selected Provider:      {slm.get('selected_provider', slm.get('execution_provider', 'CPUExecutionProvider'))}")
+    print(f"  Active Provider:        {slm.get('execution_provider', 'CPUExecutionProvider')}")
+    print(f"  NPU Acceleration:       {'ACTIVE' if slm.get('is_npu_accelerated', False) else 'INACTIVE (CPU Fallback)'}")
+    if slm.get("fallback_occurred"):
+        print(f"  Fallback Notice:        {slm.get('fallback_reason')}")
+
+    print("\n[SLM Reasoning Brain]")
+    print(f"  Provider:               {slm.get('provider')}")
+    print(f"  Model Name:             {slm.get('model_name')}")
+    print(f"  Model Size:             {slm.get('model_size_mb', '~350')} MB")
+    print(f"  Quantization:           {slm.get('quantization', 'INT8')}")
+    print(f"  Inference Backend:      {slm.get('inference_backend', 'ONNX Runtime')}")
+    print(f"  Local Only:             {slm.get('is_local', True)}")
 
     print("\n[Tool Registry]")
-    print(f"  Active Tools:       {', '.join(report.registered_tools)}")
+    print(f"  Active Tools:           {', '.join(report.registered_tools)}")
 
     if report.warnings:
         print("\n[Notices & Warnings]")
@@ -107,23 +119,43 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 
 def cmd_hardware(args: argparse.Namespace) -> int:
-    """Inspect and display detailed hardware and Snapdragon accelerator profile."""
+    """Inspect and display detailed hardware, NPU readiness, and runtime dispatch capabilities."""
+    from exocortex.runtime.provider import RuntimeDispatcher
+    config = get_config()
+    runtime_prof = RuntimeDispatcher.get_runtime_profile(requested_target=config.execution_provider)
     hw = detect_hardware()
+
     if args.json:
-        print(json.dumps(hw.to_dict(), indent=2))
+        print(json.dumps(runtime_prof.to_dict(), indent=2))
         return 0
 
     print(format_header("ExoCortex Hardware & Snapdragon Acceleration Profile"))
-    print(f"Host OS:                   {hw.os_name} {hw.os_release} (v{hw.os_version})")
-    print(f"Architecture:              {hw.architecture}")
-    print(f"ARM64 Native:              {hw.is_arm64}")
-    print(f"Processor Name:            {hw.processor_name}")
-    print(f"Snapdragon NPU Detected:   {hw.is_snapdragon_detected}")
-    print(f"NPU / Accelerator Name:    {hw.npu_name or 'Standard CPU fallback'}")
-    print(f"Available ONNX Providers:  {', '.join(hw.available_execution_providers)}")
-    print(f"Recommended Provider:      {hw.recommended_execution_provider}")
-    print(f"Total Physical Memory:     {hw.total_memory_gb:.2f} GB")
-    print(f"Available Physical Memory: {hw.available_memory_gb:.2f} GB")
+    print(f"Host OS:                   {runtime_prof.os_name} {runtime_prof.os_release} (v{runtime_prof.os_version})")
+    print(f"Architecture:              {runtime_prof.architecture}")
+    print(f"ARM64 Native:              {runtime_prof.is_arm64}")
+    print(f"Processor:                 {runtime_prof.processor_name}")
+    print(f"Snapdragon Silicon:        {'Detected' if runtime_prof.is_snapdragon_detected else 'Not Detected'}")
+    print(f"Total Physical Memory:     {runtime_prof.total_memory_gb:.2f} GB")
+    print(f"Available Physical Memory: {runtime_prof.available_memory_gb:.2f} GB")
+
+    print("\n--- ONNX Runtime Dispatch ---")
+    print(f"ONNX Runtime Version:      {runtime_prof.onnxruntime_version}")
+    print(f"Available Providers:       {', '.join(runtime_prof.available_providers)}")
+    print(f"Configured Provider:       {runtime_prof.requested_provider}")
+    print(f"Selected Provider:         {runtime_prof.selected_provider}")
+    print(f"Active Provider:           {runtime_prof.active_provider}")
+
+    print("\n--- Qualcomm Snapdragon / QNN NPU Readiness ---")
+    npu = runtime_prof.npu
+    supported_str = "YES" if npu.is_supported else "NO (x86_64 / Intel Host)"
+    installed_str = "YES" if npu.is_installed else "NO (QNNExecutionProvider not in ORT)"
+    active_str = "YES (NPU Active)" if npu.is_active else "NO (CPU Fallback Active)"
+
+    print(f"Supported by Architecture: {supported_str}")
+    print(f"QNN Provider Installed:    {installed_str}")
+    print(f"NPU Acceleration Active:   {active_str}")
+    print(f"NPU Status Summary:        {npu.status_summary}")
+
     print("=" * 64 + "\n")
     return 0
 
@@ -139,9 +171,13 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         print(json.dumps(res.to_dict(), indent=2))
         return 0
 
+    print(f"Benchmark Category:      {res.benchmark_type}")
     print(f"Model Name:              {res.model_name}")
+    print(f"Requested Provider:      {res.requested_provider}")
     print(f"Execution Provider:      {res.execution_provider}")
     print(f"NPU Accelerated:         {res.is_npu_accelerated}")
+    if res.fallback_occurred:
+        print(f"Fallback Reason:         {res.fallback_reason}")
     print(f"Model Load Time:         {res.model_load_time_ms:.1f} ms")
     print(f"Benchmark Iterations:    {res.iterations}")
     print(f"Avg Total Latency:       {res.avg_total_latency_ms:.1f} ms")

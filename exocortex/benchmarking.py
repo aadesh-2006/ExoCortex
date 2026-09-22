@@ -20,6 +20,8 @@ from exocortex.slm.factory import get_slm_provider
 class BenchmarkResult:
     """Benchmark results from running real local SLM neural inference tests."""
     model_name: str
+    benchmark_type: str
+    requested_provider: str
     execution_provider: str
     is_npu_accelerated: bool
     model_load_time_ms: float
@@ -30,11 +32,15 @@ class BenchmarkResult:
     avg_tokens_per_second: float
     total_tokens_generated: int
     peak_ram_mb: float
+    fallback_occurred: bool = False
+    fallback_reason: Optional[str] = None
     runs: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "model_name": self.model_name,
+            "benchmark_type": self.benchmark_type,
+            "requested_provider": self.requested_provider,
             "execution_provider": self.execution_provider,
             "is_npu_accelerated": self.is_npu_accelerated,
             "model_load_time_ms": round(self.model_load_time_ms, 2),
@@ -45,6 +51,8 @@ class BenchmarkResult:
             "avg_tokens_per_second": round(self.avg_tokens_per_second, 2),
             "total_tokens_generated": self.total_tokens_generated,
             "peak_ram_mb": round(self.peak_ram_mb, 2),
+            "fallback_occurred": self.fallback_occurred,
+            "fallback_reason": self.fallback_reason,
             "runs": self.runs,
         }
 
@@ -68,9 +76,15 @@ def run_benchmark(
 
     model_info = slm.get_model_info()
     model_name = model_info.get("model_name", "qwen2.5-0.5b-instruct")
+    req_provider = model_info.get("requested_provider", "auto")
     exec_provider = model_info.get("execution_provider", "CPUExecutionProvider")
     is_npu = model_info.get("is_npu_accelerated", False)
+    fallback_occurred = model_info.get("fallback_occurred", False)
+    fallback_reason = model_info.get("fallback_reason")
     load_time = float(model_info.get("load_time_ms", 0.0))
+
+    # Benchmark classification: strictly distinguish CPU vs Snapdragon/QNN measurements
+    benchmark_type = "Snapdragon/QNN benchmark" if (is_npu and exec_provider == "QNNExecutionProvider") else "CPU benchmark"
 
     run_records: List[Dict[str, Any]] = []
     tot_latencies = []
@@ -116,6 +130,8 @@ def run_benchmark(
 
     return BenchmarkResult(
         model_name=model_name,
+        benchmark_type=benchmark_type,
+        requested_provider=req_provider,
         execution_provider=exec_provider,
         is_npu_accelerated=is_npu,
         model_load_time_ms=load_time,
@@ -126,5 +142,7 @@ def run_benchmark(
         avg_tokens_per_second=avg_tps,
         total_tokens_generated=total_tokens,
         peak_ram_mb=peak_ram,
+        fallback_occurred=fallback_occurred,
+        fallback_reason=fallback_reason,
         runs=run_records,
     )

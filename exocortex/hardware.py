@@ -110,26 +110,26 @@ def detect_hardware() -> HardwareProfile:
 
     providers = detect_execution_providers()
 
-    # Determine NPU support
+    # Determine NPU support: strictly require Snapdragon hardware AND QNN Execution Provider
     has_qnn = "QNNExecutionProvider" in providers
     has_dml = "DmlExecutionProvider" in providers
 
-    is_npu_available = is_snapdragon or has_qnn
+    is_npu_available = is_snapdragon and has_qnn
     npu_name = None
-    if is_snapdragon:
-        npu_name = "Qualcomm Hexagon NPU (Snapdragon X Series)"
-    elif has_qnn:
-        npu_name = "QNN NPU Accelerator"
+    if is_snapdragon and has_qnn:
+        npu_name = "Qualcomm Hexagon NPU (Snapdragon X Series - QNN Active)"
+    elif is_snapdragon:
+        npu_name = "Qualcomm Hexagon NPU (Requires onnxruntime-qnn)"
     elif has_dml:
         npu_name = "DirectML Neural Accelerator / GPU"
+    elif has_qnn:
+        npu_name = "QNN Execution Provider (Non-Snapdragon Host)"
 
     # Select recommended provider
     if has_qnn and is_snapdragon:
         recommended_provider = "QNNExecutionProvider"
     elif has_dml:
         recommended_provider = "DmlExecutionProvider"
-    elif has_qnn:
-        recommended_provider = "QNNExecutionProvider"
     else:
         recommended_provider = "CPUExecutionProvider"
 
