@@ -6,6 +6,7 @@ Loads settings from environment variables and optional .env files.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,19 @@ except ImportError:
 
 HardwareTarget = Literal["auto", "qnn", "dml", "cpu"]
 SLMProviderType = Literal["mock", "onnx", "local_server", "llamacpp"]
+
+
+def _parse_local_server_timeout(raw: str) -> float:
+    """Parse and validate local server timeout, requiring a positive finite number of seconds."""
+    try:
+        val = float(raw)
+        if not math.isfinite(val) or val <= 0:
+            raise ValueError
+        return val
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"Invalid EXOCORTEX_LOCAL_SERVER_TIMEOUT '{raw}': must be a positive number of seconds."
+        )
 
 
 @dataclass
@@ -76,6 +90,11 @@ class Settings:
     local_server_api_key: str = field(
         default_factory=lambda: os.getenv(
             "EXOCORTEX_LOCAL_SERVER_API_KEY", "not-needed"
+        )
+    )
+    local_server_timeout: float = field(
+        default_factory=lambda: _parse_local_server_timeout(
+            os.getenv("EXOCORTEX_LOCAL_SERVER_TIMEOUT", "90.0")
         )
     )
 

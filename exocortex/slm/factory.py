@@ -52,6 +52,10 @@ def get_slm_provider(
             base_url=kwargs.get("local_server_url", cfg.local_server_url),
             model_name=kwargs.get("model_name", cfg.model_name),
             api_key=kwargs.get("local_server_api_key", cfg.local_server_api_key),
+            timeout=kwargs.get(
+                "timeout",
+                kwargs.get("local_server_timeout", getattr(cfg, "local_server_timeout", 90.0)),
+            ),
         )
     else:
         # Default to real local SLM provider

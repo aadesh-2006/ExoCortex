@@ -24,6 +24,7 @@ from exocortex.execution.state import (
 from exocortex.execution.trace import ExecutionTrace
 from exocortex.schema import AgentDecision, StructuredStep
 from exocortex.slm.base import SLMMessage, SLMProvider, SLMResponse
+from exocortex.slm.local_provider import LocalServerSLMError
 from exocortex.slm.mock_provider import MockSLMProvider
 from exocortex.tools.base import BaseTool, PermissionLevel, ToolParameter, ToolResult
 from exocortex.tools.builtin import EchoTool, HealthCheckTool, SystemInfoTool
@@ -341,6 +342,98 @@ class TestExecutionEngine(unittest.TestCase):
         self.assertEqual(result.trace.status, ExecutionStatus.COMPLETED)
         self.assertEqual(len(result.executed_tools), 1)
         self.assertEqual(result.executed_tools[0]["tool"], "system_info")
+
+    def test_retry_resets_session(self):
+        """Verify SLMProvider.reset_session is called before initial generation and retry generation."""
+        mock_slm = MagicMock(spec=SLMProvider)
+        mock_slm.is_available.return_value = True
+        mock_slm.get_model_info.return_value = {"provider": "Mock"}
+
+        invalid_resp = SLMResponse(content="Invalid non-json output", prompt_tokens=10, completion_tokens=10)
+        valid_resp = SLMResponse(
+            content=json.dumps({
+                "thought_summary": "Recovered valid json.",
+                "intent": "general_query",
+                "steps": [],
+                "direct_response": "Fixed."
+            }),
+            prompt_tokens=10,
+            completion_tokens=10,
+        )
+        mock_slm.generate.side_effect = [invalid_resp, valid_resp]
+
+        executor = AgentExecutor(
+            slm_provider=mock_slm,
+            tool_registry=self.registry,
+        )
+        trace = executor.execute("Test retry reset")
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(mock_slm.reset_session.call_count, 2)
+
+    def test_subsequent_agent_generation_resets_session(self):
+        """Verify SLMProvider.reset_session is called before each independent agent generation step."""
+        mock_slm = MagicMock(spec=SLMProvider)
+        mock_slm.is_available.return_value = True
+        mock_slm.get_model_info.return_value = {"provider": "Mock"}
+
+        step1_resp = SLMResponse(
+            content=json.dumps({
+                "thought_summary": "Calling echo tool.",
+                "intent": "general_query",
+                "steps": [{"tool": "echo", "arguments": {"message": "hello"}}],
+                "direct_response": None
+            }),
+            prompt_tokens=10,
+            completion_tokens=10,
+        )
+        step2_resp = SLMResponse(
+            content=json.dumps({
+                "thought_summary": "Synthesizing result.",
+                "intent": "general_query",
+                "steps": [],
+                "direct_response": "Finished echoing hello."
+            }),
+            prompt_tokens=10,
+            completion_tokens=10,
+        )
+        mock_slm.generate.side_effect = [step1_resp, step2_resp]
+
+        executor = AgentExecutor(
+            slm_provider=mock_slm,
+            tool_registry=self.registry,
+        )
+        trace = executor.execute("Echo and summarize")
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(mock_slm.generate.call_count, 2)
+        self.assertEqual(mock_slm.reset_session.call_count, 2)
+
+    def test_slm_provider_error_terminates_execution_cleanly(self):
+        """Verify provider exception terminates execution with ERROR status without triggering JSON repair."""
+        mock_slm = MagicMock(spec=SLMProvider)
+        mock_slm.is_available.return_value = True
+        mock_slm.get_model_info.return_value = {"provider": "Mock"}
+        mock_slm.generate.side_effect = LocalServerSLMError("Simulated Ollama server connection failure")
+
+        executor = AgentExecutor(
+            slm_provider=mock_slm,
+            tool_registry=self.registry,
+        )
+        trace = executor.execute("Test provider error handling")
+
+        # 1. State must be ERROR
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIn("SLM Generation Error: Simulated Ollama server connection failure", trace.error_message)
+        self.assertIsNone(trace.final_response)
+
+        # 2. Must record exactly 1 error step
+        self.assertEqual(len(trace.steps), 1)
+        err_step = trace.steps[0]
+        self.assertEqual(err_step.action_type, ActionType.ERROR)
+        self.assertEqual(err_step.status, ExecutionStatus.ERROR)
+        self.assertIn("Simulated Ollama server connection failure", err_step.error_message)
+
+        # 3. Provider generate must be called only ONCE (zero repair retries)
+        self.assertEqual(mock_slm.generate.call_count, 1)
 
 
 if __name__ == "__main__":
