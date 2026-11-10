@@ -8,6 +8,7 @@ URL opening, workspace filesystem operations, and process inspection.
 from __future__ import annotations
 
 from exocortex.tools.windows.desktop_windows import ListOpenWindowsTool
+from exocortex.tools.windows.ui_accessibility import InspectWindowUIElementsTool
 from exocortex.tools.windows.filesystem import (
     CreateDirectoryTool,
     ListDirectoryTool,
@@ -31,6 +32,7 @@ __all__ = [
     "CreateDirectoryTool",
     "ListProcessesTool",
     "ListOpenWindowsTool",
+    "InspectWindowUIElementsTool",
     "SystemInfoTool",
     "HealthCheckTool",
     "resolve_safe_workspace_path",

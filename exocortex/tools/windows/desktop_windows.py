@@ -89,6 +89,127 @@ except Exception as _sig_err:
     logger.debug("Failed to configure Win32 signatures at module import: %s", _sig_err)
 
 
+def enumerate_desktop_windows(
+    limit: int = DEFAULT_WINDOW_LIMIT,
+    include_handles: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Enumerate top-level application windows via Win32 APIs.
+    Safely filters out hidden, cloaked, zero-size, and background shell windows.
+
+    Args:
+        limit: Maximum number of windows to return.
+        include_handles: If True, include internal 'hwnd' in the returned dictionary.
+    """
+    _configure_win32_signatures()
+    user32 = ctypes.windll.user32
+    dwmapi = getattr(ctypes.windll, "dwmapi", None)
+
+    foreground_hwnd = user32.GetForegroundWindow()
+    raw_windows: List[Dict[str, Any]] = []
+
+    def enum_cb(hwnd: int, lparam: int) -> int:
+        if len(raw_windows) >= limit * 2:
+            # Bounded early exit
+            return 1
+
+        try:
+            # 1. Visibility check
+            if not user32.IsWindowVisible(hwnd):
+                return 1
+
+            # 2. Window title check
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return 1
+
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value.strip()
+            if not title or title == "Program Manager":
+                return 1
+
+            # 3. Non-zero dimensions check
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
+                if width <= 0 or height <= 0:
+                    return 1
+
+            # 4. Cloaked window check (Windows 8+ DWM)
+            if dwmapi:
+                is_cloaked = wintypes.DWORD(0)
+                hr = dwmapi.DwmGetWindowAttribute(
+                    hwnd,
+                    wintypes.DWORD(DWMWA_CLOAKED),
+                    ctypes.byref(is_cloaked),
+                    ctypes.sizeof(is_cloaked),
+                )
+                if hr == 0 and is_cloaked.value != 0:
+                    return 1
+
+            # 5. Process identification
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            proc_name = "unknown"
+            if pid.value:
+                try:
+                    p = psutil.Process(pid.value)
+                    proc_name = p.name()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    proc_name = "unknown"
+                except Exception:
+                    proc_name = "unknown"
+
+            is_active = bool(foreground_hwnd is not None and hwnd == foreground_hwnd)
+
+            # Truncate title
+            clean_title = title
+            if len(clean_title) > MAX_WINDOW_TITLE_CHARS:
+                clean_title = clean_title[:MAX_WINDOW_TITLE_CHARS].rstrip() + "..."
+
+            win_record: Dict[str, Any] = {
+                "title": clean_title,
+                "process_name": proc_name,
+                "is_active": is_active,
+            }
+            if include_handles:
+                win_record["hwnd"] = hwnd
+
+            raw_windows.append(win_record)
+        except Exception as item_err:
+            logger.debug("Error processing window %s: %s", hwnd, item_err)
+
+        return 1
+
+    cb = WNDENUMPROC(enum_cb)
+
+    # Attempt to access interactive Default desktop if available (e.g. running in background thread desktop)
+    h_desk = None
+    try:
+        h_desk = user32.OpenDesktopW("Default", 0, False, DESKTOP_ENUMERATE | DESKTOP_READOBJECTS)
+    except Exception:
+        h_desk = None
+
+    try:
+        if h_desk:
+            user32.EnumDesktopWindows(h_desk, cb, 0)
+        else:
+            user32.EnumWindows(cb, 0)
+    finally:
+        if h_desk:
+            try:
+                user32.CloseDesktop(h_desk)
+            except Exception:
+                pass
+
+    # Sort so active/foreground window appears first, then by title
+    raw_windows.sort(key=lambda w: (not w["is_active"], w["title"].lower()))
+    return raw_windows[:limit]
+
+
+
 
 class ListOpenWindowsTool(BaseTool):
     """Safe, read-only tool to enumerate visible desktop application windows."""
@@ -115,107 +236,8 @@ class ListOpenWindowsTool(BaseTool):
         Enumerate top-level application windows via Win32 APIs.
         Safely filters out hidden, cloaked, zero-size, and background shell windows.
         """
-        user32 = ctypes.windll.user32
-        dwmapi = getattr(ctypes.windll, "dwmapi", None)
+        return enumerate_desktop_windows(limit=limit, include_handles=False)
 
-        foreground_hwnd = user32.GetForegroundWindow()
-        raw_windows: List[Dict[str, Any]] = []
-
-        def enum_cb(hwnd: int, lparam: int) -> int:
-            if len(raw_windows) >= limit * 2:
-                # Bounded early exit
-                return 1
-
-            try:
-                # 1. Visibility check
-                if not user32.IsWindowVisible(hwnd):
-                    return 1
-
-                # 2. Window title check
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length <= 0:
-                    return 1
-
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = buf.value.strip()
-                if not title or title == "Program Manager":
-                    return 1
-
-                # 3. Non-zero dimensions check
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    width = rect.right - rect.left
-                    height = rect.bottom - rect.top
-                    if width <= 0 or height <= 0:
-                        return 1
-
-                # 4. Cloaked window check (Windows 8+ DWM)
-                if dwmapi:
-                    is_cloaked = wintypes.DWORD(0)
-                    hr = dwmapi.DwmGetWindowAttribute(
-                        hwnd,
-                        wintypes.DWORD(DWMWA_CLOAKED),
-                        ctypes.byref(is_cloaked),
-                        ctypes.sizeof(is_cloaked),
-                    )
-                    if hr == 0 and is_cloaked.value != 0:
-                        return 1
-
-                # 5. Process identification
-                pid = wintypes.DWORD(0)
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                proc_name = "unknown"
-                if pid.value:
-                    try:
-                        p = psutil.Process(pid.value)
-                        proc_name = p.name()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                        proc_name = "unknown"
-                    except Exception:
-                        proc_name = "unknown"
-
-                is_active = bool(foreground_hwnd is not None and hwnd == foreground_hwnd)
-
-                # Truncate title
-                clean_title = title
-                if len(clean_title) > MAX_WINDOW_TITLE_CHARS:
-                    clean_title = clean_title[:MAX_WINDOW_TITLE_CHARS].rstrip() + "..."
-
-                raw_windows.append({
-                    "title": clean_title,
-                    "process_name": proc_name,
-                    "is_active": is_active,
-                })
-            except Exception as item_err:
-                logger.debug("Error processing window %s: %s", hwnd, item_err)
-
-            return 1
-
-        cb = WNDENUMPROC(enum_cb)
-
-        # Attempt to access interactive Default desktop if available (e.g. running in background thread desktop)
-        h_desk = None
-        try:
-            h_desk = user32.OpenDesktopW("Default", 0, False, DESKTOP_ENUMERATE | DESKTOP_READOBJECTS)
-        except Exception:
-            h_desk = None
-
-        try:
-            if h_desk:
-                user32.EnumDesktopWindows(h_desk, cb, 0)
-            else:
-                user32.EnumWindows(cb, 0)
-        finally:
-            if h_desk:
-                try:
-                    user32.CloseDesktop(h_desk)
-                except Exception:
-                    pass
-
-        # Sort so active/foreground window appears first, then by title
-        raw_windows.sort(key=lambda w: (not w["is_active"], w["title"].lower()))
-        return raw_windows[:limit]
 
     def run(self, **kwargs: Any) -> ToolResult:
         """Execute open window enumeration."""

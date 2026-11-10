@@ -104,6 +104,7 @@ def get_default_tool_registry() -> ToolRegistry:
         from exocortex.tools.builtin import EchoTool, HealthCheckTool, SystemInfoTool
         from exocortex.tools.windows import (
             CreateDirectoryTool,
+            InspectWindowUIElementsTool,
             LaunchApplicationTool,
             ListDirectoryTool,
             ListOpenWindowsTool,
@@ -126,6 +127,8 @@ def get_default_tool_registry() -> ToolRegistry:
         _default_registry.register(CreateDirectoryTool())
         _default_registry.register(ListProcessesTool())
         _default_registry.register(ListOpenWindowsTool())
+        _default_registry.register(InspectWindowUIElementsTool())
+
 
         # Safe Web Research tools (Milestone 6)
         from exocortex.tools.web import FetchWebPageTool, WebSearchTool
