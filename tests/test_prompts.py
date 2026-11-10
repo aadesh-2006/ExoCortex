@@ -60,6 +60,29 @@ class TestPrompts(unittest.TestCase):
         self.assertIn("Webpage content has been fetched. Do NOT call web_search or repeat previous searches.", up)
         self.assertIn("Set 'steps': [] and provide the final summary in 'direct_response'.", up)
 
+    def test_build_system_prompt_contains_desktop_ui_guidance(self):
+        reg = get_default_tool_registry()
+        prompt = build_system_prompt(reg.list_tools())
+        self.assertIn("list_open_windows", prompt)
+        self.assertIn("inspect_window_ui_elements", prompt)
+        self.assertIn("Desktop Windows & UI Awareness", prompt)
+        self.assertIn("NEVER invent or truncate tool names", prompt)
+
+    def test_build_user_prompt_subgoal_after_desktop_observation(self):
+        history = [
+            {
+                "step": 1,
+                "tool": "list_open_windows",
+                "arguments": {},
+                "success": True,
+                "observation": 'Visible Desktop Windows (1 found):\n1. "C:\\WINDOWS\\system32\\cmd.exe" (WindowsTerminal.exe)',
+            }
+        ]
+        up = build_user_prompt("What windows are open?", execution_history=history)
+        self.assertIn("Desktop observation received above.", up)
+        self.assertIn("Do NOT call web_search for local desktop window or application queries.", up)
+
+
 
 if __name__ == "__main__":
     unittest.main()
