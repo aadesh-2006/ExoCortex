@@ -37,6 +37,14 @@ DEFAULT_MAX_STEPS = 8
 DEFAULT_MAX_IDENTICAL_ACTIONS = 2
 DEFAULT_MAX_RESULT_CHARS = 2000
 
+# Explicit allowlist of read-only desktop tools eligible for direct observation completion.
+# Web research tools and write-capable tools are intentionally excluded.
+DIRECT_COMPLETION_TOOLS = {
+    "list_open_windows",
+    "list_processes",
+    "inspect_window_ui_elements",
+}
+
 
 class AgentExecutor:
     """
@@ -50,12 +58,14 @@ class AgentExecutor:
         max_steps: int = DEFAULT_MAX_STEPS,
         max_identical_actions: int = DEFAULT_MAX_IDENTICAL_ACTIONS,
         max_result_chars: int = DEFAULT_MAX_RESULT_CHARS,
+        direct_observation_completion: bool = True,
     ) -> None:
         self.slm_provider = slm_provider
         self.tool_registry = tool_registry or get_default_tool_registry()
         self.max_steps = max_steps
         self.max_identical_actions = max_identical_actions
         self.max_result_chars = max_result_chars
+        self.direct_observation_completion = direct_observation_completion
 
     def execute(self, user_goal: str) -> ExecutionTrace:
         """
@@ -332,6 +342,34 @@ class AgentExecutor:
                 )
                 state.steps.append(exec_step)
                 trace.steps.append(exec_step)
+
+                # F. Check Direct Observation Completion policy
+                # Avoids second LLM synthesis call when single-tool read-only desktop observation is complete
+                prior_tool_steps = [s for s in state.steps if s.action_type == ActionType.TOOL_CALL]
+                if (
+                    self.direct_observation_completion
+                    and getattr(decision, "planned_steps_count", len(decision.steps)) == 1
+                    and len(prior_tool_steps) == 1
+                    and step_item.tool in DIRECT_COMPLETION_TOOLS
+                    and tool_res.success
+                    and bool(tool_res.output and tool_res.output.strip())
+                    and state.status not in (
+                        ExecutionStatus.CONFIRMATION_REQUIRED,
+                        ExecutionStatus.LOOP_DETECTED,
+                        ExecutionStatus.ERROR,
+                        ExecutionStatus.MAX_STEPS_EXCEEDED,
+                    )
+                    and state.error_message is None
+                ):
+                    logger.info(
+                        "Direct observation completion policy satisfied for tool '%s'. "
+                        "Completing execution without redundant synthesis LLM call.",
+                        step_item.tool,
+                    )
+                    state.status = ExecutionStatus.COMPLETED
+                    state.final_response = tool_res.output
+                    exec_step.status = ExecutionStatus.COMPLETED
+                    break
 
             # If stopped by confirmation or loop detection, break outer loop
             if state.is_finished():

@@ -13,6 +13,12 @@ from exocortex.execution.executor import (
     DEFAULT_MAX_STEPS,
     AgentExecutor,
 )
+from exocortex.execution.fast_path import (
+    CANONICAL_FAST_PATH_MAP,
+    FAST_PATH_ELIGIBLE_TOOLS,
+    FastPathRouter,
+    normalize_fast_path_query,
+)
 from exocortex.execution.state import (
     ActionHistoryTracker,
     ActionType,
@@ -24,6 +30,10 @@ from exocortex.execution.trace import ExecutionTrace
 
 __all__ = [
     "AgentExecutor",
+    "FastPathRouter",
+    "CANONICAL_FAST_PATH_MAP",
+    "FAST_PATH_ELIGIBLE_TOOLS",
+    "normalize_fast_path_query",
     "ExecutionState",
     "ExecutionStatus",
     "ExecutionStep",

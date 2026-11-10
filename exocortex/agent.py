@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from exocortex.config import Settings, get_config
-from exocortex.execution import AgentExecutor, ExecutionStatus, ExecutionTrace
+from exocortex.execution import AgentExecutor, ExecutionStatus, ExecutionTrace, FastPathRouter
 from exocortex.planner import ExecutionPlan, PlanStep, StepStatus
 from exocortex.schema import AgentDecision, StructuredStep
 from exocortex.slm.base import Role, SLMMessage, SLMProvider, SLMResponse
@@ -66,14 +66,35 @@ class ExoCortexAgent:
         config: Optional[Settings] = None,
         slm_provider: Optional[SLMProvider] = None,
         tool_registry: Optional[ToolRegistry] = None,
+        fast_path: Optional[FastPathRouter] = None,
+        enable_fast_path: Optional[bool] = None,
+        direct_observation_completion: Optional[bool] = None,
     ) -> None:
         self.config = config or get_config()
         self.slm_provider = slm_provider or get_slm_provider(config=self.config)
         self.tool_registry = tool_registry or get_default_tool_registry()
+
+        if enable_fast_path is not None:
+            self.enable_fast_path = enable_fast_path
+        else:
+            self.enable_fast_path = getattr(self.config, "enable_fast_path", True)
+
+        self.fast_path = fast_path or FastPathRouter(
+            tool_registry=self.tool_registry,
+            enabled=self.enable_fast_path,
+        )
+
+        direct_complete = (
+            direct_observation_completion
+            if direct_observation_completion is not None
+            else getattr(self.config, "direct_observation_completion", True)
+        )
+
         self.executor = AgentExecutor(
             slm_provider=self.slm_provider,
             tool_registry=self.tool_registry,
             max_steps=self.config.max_plan_steps,
+            direct_observation_completion=direct_complete,
         )
         self.history: List[SLMMessage] = []
 
@@ -84,7 +105,14 @@ class ExoCortexAgent:
         logger.info("Executing ExoCortex reasoning loop for: '%s'", user_prompt)
         self.history.append(SLMMessage(role="user", content=user_prompt))
 
-        trace = self.executor.execute(user_prompt)
+        # Check deterministic fast-path for canonical zero-argument desktop requests
+        trace = None
+        if self.enable_fast_path and self.fast_path:
+            trace = self.fast_path.try_execute(user_prompt)
+
+        # Fall through to the general SLM cognitive loop if fast-path did not match
+        if trace is None:
+            trace = self.executor.execute(user_prompt)
 
         # Collect executed tool steps for compatibility and reporting
         executed_tools_record: List[Dict[str, Any]] = []
@@ -135,7 +163,7 @@ class ExoCortexAgent:
             plan=plan,
             executed_tools=executed_tools_record,
             total_latency_ms=trace.total_duration_ms,
-            slm_info=self.slm_provider.get_model_info(),
+            slm_info=trace.slm_info if (trace and trace.slm_info) else self.slm_provider.get_model_info(),
             validation_error=trace.error_message if not is_success else None,
             trace=trace,
         )

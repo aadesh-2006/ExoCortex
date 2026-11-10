@@ -109,6 +109,18 @@ class Settings:
         default_factory=lambda: int(os.getenv("EXOCORTEX_MAX_PLAN_STEPS", "10"))
     )
 
+    # Runtime Optimization Policies
+    enable_fast_path: bool = field(
+        default_factory=lambda: os.getenv(
+            "EXOCORTEX_ENABLE_FAST_PATH", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+    direct_observation_completion: bool = field(
+        default_factory=lambda: os.getenv(
+            "EXOCORTEX_DIRECT_OBSERVATION_COMPLETION", "true"
+        ).lower() in ("1", "true", "yes", "on")
+    )
+
     def ensure_data_dir(self) -> Path:
         """Ensure that the data directory exists."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

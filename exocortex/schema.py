@@ -52,6 +52,10 @@ class AgentDecision(BaseModel):
         default=None,
         description="Direct conversational answer when no tool execution is needed"
     )
+    planned_steps_count: int = Field(
+        default=1,
+        description="Number of tool steps originally planned by the SLM in this decision"
+    )
 
     @property
     def has_steps(self) -> bool:
