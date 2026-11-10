@@ -125,4 +125,9 @@ def get_default_tool_registry() -> ToolRegistry:
         _default_registry.register(CreateDirectoryTool())
         _default_registry.register(ListProcessesTool())
 
+        # Safe Web Research tools (Milestone 6)
+        from exocortex.tools.web import FetchWebPageTool, WebSearchTool
+        _default_registry.register(WebSearchTool())
+        _default_registry.register(FetchWebPageTool())
+
     return _default_registry

@@ -23,6 +23,44 @@ class TestPrompts(unittest.TestCase):
         up = build_user_prompt("Check my CPU and memory")
         self.assertIn("User Request: Check my CPU and memory", up)
 
+    def test_build_user_prompt_subgoal_after_web_search(self):
+        history = [
+            {
+                "step": 1,
+                "tool": "web_search",
+                "arguments": {"query": "Pune Wikipedia"},
+                "success": True,
+                "observation": "1. [en.wikipedia.org/wiki/Pune] - https://en.wikipedia.org/wiki/Pune",
+            }
+        ]
+        up = build_user_prompt("Find info about Pune", execution_history=history)
+        self.assertIn("### CURRENT SUB-GOAL / NEXT ACTION (CHOOSE FROM RETURNED DATA):", up)
+        self.assertIn("Search is completed. Select one of the returned URLs from the search results above", up)
+        self.assertIn("fetch_web_page", up)
+
+    def test_build_user_prompt_subgoal_after_fetch_web_page(self):
+        history = [
+            {
+                "step": 1,
+                "tool": "web_search",
+                "arguments": {"query": "Pune Wikipedia"},
+                "success": True,
+                "observation": "1. [en.wikipedia.org/wiki/Pune] - https://en.wikipedia.org/wiki/Pune",
+            },
+            {
+                "step": 2,
+                "tool": "fetch_web_page",
+                "arguments": {"url": "https://en.wikipedia.org/wiki/Pune"},
+                "success": True,
+                "observation": "Pune is a city in Maharashtra, India.",
+            },
+        ]
+        up = build_user_prompt("Find info about Pune", execution_history=history)
+        self.assertIn("### CURRENT SUB-GOAL / NEXT ACTION (CHOOSE FROM RETURNED DATA):", up)
+        self.assertIn("Webpage content has been fetched. Do NOT call web_search or repeat previous searches.", up)
+        self.assertIn("Set 'steps': [] and provide the final summary in 'direct_response'.", up)
+
 
 if __name__ == "__main__":
     unittest.main()
+

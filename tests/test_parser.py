@@ -122,6 +122,20 @@ Done."""
         self.assertIsNotNone(decision)
         self.assertTrue(decision.requires_confirmation)
 
+    def test_reject_url_as_tool_name(self):
+        raw = """{
+  "thought_summary": "Fetching Wikipedia page.",
+  "intent": "web_fetch",
+  "steps": [
+    {"tool": "simple.wikipedia.org/wiki/Pune", "arguments": {}}
+  ],
+  "requires_confirmation": false
+}"""
+        decision, err = parse_and_validate_decision(raw, self.registry)
+        self.assertIsNone(decision)
+        self.assertIn("Unknown tool requested: 'simple.wikipedia.org/wiki/Pune'", err)
+
 
 if __name__ == "__main__":
     unittest.main()
+

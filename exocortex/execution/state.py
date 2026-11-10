@@ -47,6 +47,71 @@ class ExecutionStep:
     status: ExecutionStatus = ExecutionStatus.RUNNING
     error_message: Optional[str] = None
 
+    def get_compact_observation(self, max_snippet_chars: int = 100, max_page_chars: int = 500) -> str:
+        """
+        Return a concise observation representation for SLM context budget management.
+        
+        Preserves titles, URLs, result numbers, and <untrusted_web_content> tags,
+        while strictly bounding verbose snippets and page content to prevent prompt context explosion.
+        """
+        if self.tool_name == "web_search" and self.tool_result and self.tool_result.data:
+            data = self.tool_result.data
+            results = data.get("results", [])
+            query = data.get("query", self.arguments.get("query", ""))
+            if not results:
+                return f"<untrusted_web_content query=\"{query}\">\nNo search results found.\n</untrusted_web_content>"
+            
+            lines = [f"<untrusted_web_content query=\"{query}\">"]
+            for idx, item in enumerate(results, start=1):
+                title = (item.get("title") or "").strip()
+                url = (item.get("url") or "").strip()
+                snippet = (item.get("snippet") or "").strip()
+                if len(snippet) > max_snippet_chars:
+                    snippet = snippet[:max_snippet_chars].strip() + "..."
+                lines.append(f"{idx}. [{title}] - {url}")
+                if snippet:
+                    lines.append(f"   Snippet: {snippet}")
+            lines.append("</untrusted_web_content>")
+            return "\n".join(lines)
+
+        if self.tool_name == "fetch_web_page" and self.tool_result and self.tool_result.success:
+            url = ""
+            if self.tool_result.data and isinstance(self.tool_result.data, dict):
+                url = self.tool_result.data.get("url", "")
+            if not url:
+                url = str(self.arguments.get("url", ""))
+            
+            raw = self.tool_result.output or ""
+            # If wrapped in <untrusted_web_content>, extract interior
+            if "<untrusted_web_content" in raw and "</untrusted_web_content>" in raw:
+                try:
+                    start_idx = raw.index(">") + 1
+                    end_idx = raw.rindex("</untrusted_web_content>")
+                    interior = raw[start_idx:end_idx].strip()
+                except Exception:
+                    interior = raw.strip()
+            else:
+                interior = raw.strip()
+            
+            if len(interior) > max_page_chars:
+                interior = interior[:max_page_chars].strip() + f"... [bounded to {max_page_chars} chars]"
+            
+            return f"<untrusted_web_content url=\"{url}\">\n{interior}\n</untrusted_web_content>"
+
+        if self.tool_result:
+            if not self.tool_result.success:
+                err = self.tool_result.error or "Tool failed."
+                return f"Error: {err[:200]}"
+            text = self.tool_result.output or ""
+            if len(text) > 300:
+                return text[:300].strip() + "... [truncated]"
+            return text
+
+        obs = self.observation_text or self.error_message or ""
+        if len(obs) > 300:
+            return obs[:300].strip() + "... [truncated]"
+        return obs
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "step_number": self.step_number,
@@ -139,16 +204,17 @@ class ExecutionState:
             ExecutionStatus.ERROR,
         )
 
-    def get_history_summary(self) -> List[Dict[str, Any]]:
+    def get_history_summary(self, compact: bool = True) -> List[Dict[str, Any]]:
         """Return a structured list of previous steps and observation snippets for the SLM."""
         history = []
         for step in self.steps:
             if step.tool_name:
+                obs = step.get_compact_observation() if compact else step.observation_text
                 history.append({
                     "step": step.step_number,
                     "tool": step.tool_name,
                     "arguments": step.arguments,
                     "success": step.tool_result.success if step.tool_result else False,
-                    "observation": step.observation_text,
+                    "observation": obs,
                 })
         return history

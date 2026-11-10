@@ -101,6 +101,7 @@ class AgentExecutor:
 
             # 3. Query SLM for structured decision
             step_start = time.perf_counter()
+            self.slm_provider.reset_session()
             try:
                 slm_res: SLMResponse = self.slm_provider.generate(
                     prompt=formatted_user_prompt,
@@ -135,10 +136,13 @@ class AgentExecutor:
             # 5. Retry once if output was malformed
             if decision is None:
                 logger.warning("SLM output validation failed: %s. Retrying...", parse_err)
+                self.slm_provider.reset_session()
                 repair_prompt = (
-                    f"Your previous response failed validation: {parse_err}\n"
-                    "Output ONLY a single valid JSON object matching the required schema: "
-                    '{"thought_summary": "...", "intent": "...", "steps": [], "requires_confirmation": false, "direct_response": "..."}'
+                    f"{formatted_user_prompt}\n\n"
+                    f"### VALIDATION ERROR IN PREVIOUS ATTEMPT:\n"
+                    f"{parse_err}\n"
+                    "Remember: Use only exact tool names from REGISTERED TOOLS (e.g. 'web_search', 'fetch_web_page'). Never use URLs or domains as tool names.\n"
+                    "Output ONLY a single valid JSON codeblock matching the required schema."
                 )
                 try:
                     slm_res = self.slm_provider.generate(

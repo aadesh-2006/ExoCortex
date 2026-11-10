@@ -107,3 +107,7 @@ class SLMProvider(ABC):
             "available": available,
             "model_info": self.get_model_info(),
         }
+
+    def reset_session(self) -> None:
+        """Reset or clear active session state if supported by provider."""
+        pass

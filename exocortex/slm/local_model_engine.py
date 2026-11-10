@@ -172,7 +172,7 @@ class LocalSLMProvider(SLMProvider):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.1,
-        max_tokens: int = 160,
+        max_tokens: int = 256,
         **kwargs: Any,
     ) -> SLMResponse:
         """
@@ -240,3 +240,8 @@ class LocalSLMProvider(SLMProvider):
             max_tokens=max_tokens,
             **kwargs,
         )
+
+    def reset_session(self) -> None:
+        """Reset the underlying neural generator's ONNX session."""
+        if self.generator:
+            self.generator.reset_session()

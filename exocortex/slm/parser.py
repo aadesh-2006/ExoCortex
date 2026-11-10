@@ -81,7 +81,23 @@ def repair_malformed_json(text: str) -> Optional[Dict[str, Any]]:
     # (avoid replacing apostrophes inside words by checking for quote preceded by whitespace or brace)
     content = re.sub(r"([{,\s])'([^']+)'(\s*[:,\}\]])", r'\1"\2"\3', content)
 
-    # If missing closing brace, append
+    # Strip trailing incomplete array elements or truncated objects
+    content = re.sub(r",\s*\{[^}]*$", "", content)
+    content = re.sub(r",\s*\"[^\"]*$", "", content)
+    content = re.sub(r",\s*$", "", content)
+
+    # If unclosed quote remains, close it
+    quotes_count = len(re.findall(r'(?<!\\)"', content))
+    if quotes_count % 2 != 0:
+        content += '"'
+
+    # Close missing brackets
+    open_brackets = content.count("[")
+    close_brackets = content.count("]")
+    if open_brackets > close_brackets:
+        content += "]" * (open_brackets - close_brackets)
+
+    # Close missing braces
     open_braces = content.count("{")
     close_braces = content.count("}")
     if open_braces > close_braces:
@@ -118,6 +134,10 @@ def parse_and_validate_decision(
         return None, f"Schema validation error: {ve.errors()}"
     except Exception as e:
         return None, f"Invalid decision structure: {str(e)}"
+
+    # Limit to 1 tool step per reasoning iteration
+    if len(decision.steps) > 1:
+        decision.steps = decision.steps[:1]
 
     # Validate tool steps against ToolRegistry
     for step in decision.steps:

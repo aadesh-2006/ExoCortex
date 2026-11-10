@@ -135,6 +135,30 @@ class ONNXNeuralGenerator:
             self.is_npu_active,
         )
 
+    def reset_session(self) -> None:
+        """Reset the ONNX inference session to clear internal tensor memory arena state."""
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.intra_op_num_threads = min(os.cpu_count() or 4, 8)
+        providers_to_try = [self.selected_provider]
+        if self.selected_provider != "CPUExecutionProvider":
+            providers_to_try.append("CPUExecutionProvider")
+        try:
+            self.session = ort.InferenceSession(
+                str(self.model_path),
+                sess_options=opts,
+                providers=providers_to_try,
+            )
+            self.active_provider = self.session.get_providers()[0]
+        except Exception as err:
+            logger.warning("reset_session fallback to CPUExecutionProvider: %s", err)
+            self.session = ort.InferenceSession(
+                str(self.model_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+            self.active_provider = "CPUExecutionProvider"
+
     def format_chatml(self, user_prompt: str, system_prompt: Optional[str] = None) -> str:
         """Format prompt using Qwen2.5 ChatML template."""
         parts = []
@@ -148,7 +172,7 @@ class ONNXNeuralGenerator:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        max_new_tokens: int = 160,
+        max_new_tokens: int = 256,
         temperature: float = 0.1,
     ) -> GenerationOutput:
         """
