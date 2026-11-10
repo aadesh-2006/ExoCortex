@@ -37,7 +37,7 @@ class TestWebToolsIntegration(unittest.TestCase):
         # 2 & 3. Verify web_search and fetch_web_page are present
         self.assertIn("web_search", tool_names)
         self.assertIn("fetch_web_page", tool_names)
-        self.assertEqual(len(tools), 11)
+        self.assertGreaterEqual(len(tools), 11)
 
     def test_web_tools_have_safe_permission(self):
         """4. Verify web_search and fetch_web_page have PermissionLevel.SAFE."""

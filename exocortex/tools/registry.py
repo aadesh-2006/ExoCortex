@@ -106,6 +106,7 @@ def get_default_tool_registry() -> ToolRegistry:
             CreateDirectoryTool,
             LaunchApplicationTool,
             ListDirectoryTool,
+            ListOpenWindowsTool,
             ListProcessesTool,
             OpenUrlTool,
             ReadTextFileTool,
@@ -124,6 +125,7 @@ def get_default_tool_registry() -> ToolRegistry:
         _default_registry.register(ReadTextFileTool())
         _default_registry.register(CreateDirectoryTool())
         _default_registry.register(ListProcessesTool())
+        _default_registry.register(ListOpenWindowsTool())
 
         # Safe Web Research tools (Milestone 6)
         from exocortex.tools.web import FetchWebPageTool, WebSearchTool
