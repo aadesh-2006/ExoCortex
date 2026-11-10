@@ -102,12 +102,14 @@ class TestLocalServerSLMProvider(unittest.TestCase):
         self.assertEqual(default_provider.base_url, "http://localhost:11434/v1")
         self.assertEqual(default_provider.model_name, "phi-3.5-mini-instruct")
         self.assertEqual(default_provider.timeout, 90.0)
+        self.assertEqual(default_provider.max_tokens, 1024)
 
         info = self.provider.get_model_info()
         self.assertEqual(info["model_name"], "qwen3:4b")
         self.assertEqual(info["provider"], "LocalServerSLMProvider")
         self.assertEqual(info["base_url"], "http://localhost:11434/v1")
         self.assertEqual(info["timeout"], 90.0)
+        self.assertEqual(info["max_tokens"], 1024)
         self.assertTrue(info["is_local"])
 
     def test_init_rejects_non_positive_or_invalid_timeout(self):
@@ -213,6 +215,7 @@ class TestLocalServerSLMProvider(unittest.TestCase):
         self.assertEqual(res.content, "Chat reply")
         req, _ = mock_urlopen.call_args
         sent_payload = json.loads(req[0].data.decode("utf-8"))
+        self.assertEqual(sent_payload["max_tokens"], 1024)
         self.assertEqual(len(sent_payload["messages"]), 2)
         self.assertEqual(sent_payload["messages"][0]["role"], "system")
         self.assertEqual(sent_payload["messages"][1]["content"], "User message")

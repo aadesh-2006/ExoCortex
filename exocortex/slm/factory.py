@@ -56,6 +56,7 @@ def get_slm_provider(
                 "timeout",
                 kwargs.get("local_server_timeout", getattr(cfg, "local_server_timeout", 90.0)),
             ),
+            max_tokens=kwargs.get("max_tokens", 1024),
         )
     else:
         # Default to real local SLM provider

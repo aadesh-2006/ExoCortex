@@ -55,10 +55,12 @@ class LocalServerSLMProvider(SLMProvider):
         model_name: str = "phi-3.5-mini-instruct",
         api_key: str = "not-needed",
         timeout: float = 90.0,
+        max_tokens: int = 1024,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.api_key = api_key
+        self.max_tokens = max_tokens
         try:
             t = float(timeout)
             if not math.isfinite(t) or t <= 0:
@@ -85,6 +87,7 @@ class LocalServerSLMProvider(SLMProvider):
             "provider": "LocalServerSLMProvider",
             "base_url": self.base_url,
             "timeout": self.timeout,
+            "max_tokens": self.max_tokens,
             "is_local": True,
         }
 
@@ -93,7 +96,7 @@ class LocalServerSLMProvider(SLMProvider):
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: float = 0.2,
-        max_tokens: int = 512,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> SLMResponse:
         messages = []
@@ -101,17 +104,20 @@ class LocalServerSLMProvider(SLMProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        return self._send_chat_request(messages, temperature, max_tokens)
+        token_limit = max_tokens if max_tokens is not None else self.max_tokens
+        return self._send_chat_request(messages, temperature, token_limit)
 
     def chat(
         self,
         messages: List[SLMMessage],
         temperature: float = 0.2,
-        max_tokens: int = 512,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> SLMResponse:
         formatted = [m.to_dict() for m in messages]
-        return self._send_chat_request(formatted, temperature, max_tokens)
+        token_limit = max_tokens if max_tokens is not None else self.max_tokens
+        return self._send_chat_request(formatted, temperature, token_limit)
+
 
     def _send_chat_request(
         self,
