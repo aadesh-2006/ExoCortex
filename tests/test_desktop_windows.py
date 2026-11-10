@@ -198,6 +198,55 @@ class TestListOpenWindowsTool(unittest.TestCase):
         self.assertIsNotNone(tool)
         self.assertEqual(tool.permission_level, PermissionLevel.SAFE)
 
+    def test_high_bit_64bit_handle_active_matching(self):
+        """Verify active window matching works for 64-bit handles with high bits set."""
+        # Handles > 0x7FFFFFFF (bit 31 set) must not be truncated to negative 32-bit signed int
+        high_hwnd = 0x8000ABCD
+
+        def fake_enum_windows(callback, lparam):
+            callback(high_hwnd, lparam)
+            return 1
+
+        with patch("ctypes.windll.user32.OpenDesktopW", return_value=None), \
+             patch("ctypes.windll.user32.EnumWindows", side_effect=fake_enum_windows), \
+             patch("ctypes.windll.user32.IsWindowVisible", return_value=1), \
+             patch("ctypes.windll.user32.GetWindowTextLengthW", return_value=12), \
+             patch("ctypes.windll.user32.GetWindowTextW") as mock_text, \
+             patch("ctypes.windll.user32.GetWindowRect") as mock_rect, \
+             patch("ctypes.windll.dwmapi.DwmGetWindowAttribute", return_value=0), \
+             patch("ctypes.windll.user32.GetWindowThreadProcessId", return_value=1), \
+             patch("ctypes.windll.user32.GetForegroundWindow", return_value=high_hwnd), \
+             patch("psutil.Process"):
+
+            def fill_title(hwnd, buf, max_count):
+                buf.value = "High Bit Win"
+                return 12
+
+            def fill_rect(hwnd, rect_ref):
+                r = rect_ref._obj if hasattr(rect_ref, "_obj") else rect_ref
+                r.left, r.top, r.right, r.bottom = 0, 0, 500, 500
+                return 1
+
+            mock_text.side_effect = fill_title
+            mock_rect.side_effect = fill_rect
+
+            result = self.tool.run()
+            self.assertTrue(result.success)
+            self.assertEqual(len(result.data["windows"]), 1)
+            self.assertTrue(result.data["windows"][0]["is_active"])
+
+    def test_win32_signatures_configured_correctly(self):
+        """Verify user32 Win32 function signatures have explicit restype and argtypes."""
+        user32 = ctypes.windll.user32
+        self.assertEqual(user32.GetForegroundWindow.restype, wintypes.HWND)
+        self.assertEqual(user32.OpenDesktopW.restype, wintypes.HDESK)
+        self.assertEqual(user32.CloseDesktop.restype, wintypes.BOOL)
+        self.assertEqual(user32.EnumWindows.restype, wintypes.BOOL)
+        self.assertEqual(user32.EnumDesktopWindows.restype, wintypes.BOOL)
+        self.assertEqual(user32.GetWindowTextLengthW.restype, ctypes.c_int)
+        self.assertEqual(user32.IsWindowVisible.restype, wintypes.BOOL)
+
+
 
 class TestListOpenWindowsIntegration(unittest.TestCase):
     """Integration test with ExoCortexAgent and AgentExecutor."""

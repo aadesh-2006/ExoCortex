@@ -36,6 +36,60 @@ DESKTOP_READOBJECTS = 0x0001
 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 
 
+def _configure_win32_signatures() -> None:
+    """Explicitly configure ctypes argument and return types for 64-bit safety."""
+    user32 = ctypes.windll.user32
+
+    # GetForegroundWindow returns HWND (pointer-sized handle, not signed 32-bit int)
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetWindowRect.restype = wintypes.BOOL
+
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+    # OpenDesktopW / CloseDesktop / EnumDesktopWindows
+    user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    user32.OpenDesktopW.restype = wintypes.HDESK
+
+    user32.CloseDesktop.argtypes = [wintypes.HDESK]
+    user32.CloseDesktop.restype = wintypes.BOOL
+
+    user32.EnumDesktopWindows.argtypes = [wintypes.HDESK, WNDENUMPROC, wintypes.LPARAM]
+    user32.EnumDesktopWindows.restype = wintypes.BOOL
+
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+
+    dwmapi = getattr(ctypes.windll, "dwmapi", None)
+    if dwmapi and hasattr(dwmapi, "DwmGetWindowAttribute"):
+        dwmapi.DwmGetWindowAttribute.argtypes = [
+            wintypes.HWND,
+            wintypes.DWORD,
+            wintypes.LPCVOID,
+            wintypes.DWORD,
+        ]
+        dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+
+
+try:
+    _configure_win32_signatures()
+except Exception as _sig_err:
+    logger.debug("Failed to configure Win32 signatures at module import: %s", _sig_err)
+
+
+
 class ListOpenWindowsTool(BaseTool):
     """Safe, read-only tool to enumerate visible desktop application windows."""
 
@@ -121,7 +175,7 @@ class ListOpenWindowsTool(BaseTool):
                     except Exception:
                         proc_name = "unknown"
 
-                is_active = bool(hwnd == foreground_hwnd)
+                is_active = bool(foreground_hwnd is not None and hwnd == foreground_hwnd)
 
                 # Truncate title
                 clean_title = title
