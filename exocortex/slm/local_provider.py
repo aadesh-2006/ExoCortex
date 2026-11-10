@@ -37,6 +37,11 @@ class LocalServerTimeoutError(LocalServerSLMError, TimeoutError):
     pass
 
 
+class LocalServerIncompleteGenerationError(LocalServerSLMError):
+    """Raised when the local SLM server exhausts completion token budget before emitting complete decision content."""
+    pass
+
+
 class LocalServerSLMProvider(SLMProvider):
     """
     SLM Provider communicating with a local server (e.g. Ollama, LM Studio, vLLM).
@@ -175,8 +180,22 @@ class LocalServerSLMProvider(SLMProvider):
             )
 
         choice = choices[0]
+        finish_reason = choice.get("finish_reason")
         msg = choice.get("message", {})
         content = msg.get("content", "") or ""
+
+        # Check for incomplete / truncated generation (token budget exhaustion)
+        if finish_reason == "length":
+            if not content.strip():
+                raise LocalServerIncompleteGenerationError(
+                    f"Local SLM server exhausted completion token budget (finish_reason='length') "
+                    f"before final decision content was produced (max_tokens={max_tokens})."
+                )
+            else:
+                raise LocalServerIncompleteGenerationError(
+                    f"Local SLM server output was truncated due to completion token budget (finish_reason='length', "
+                    f"max_tokens={max_tokens}). Incomplete content cannot be safely used as a valid decision."
+                )
 
         # Parse tool calls if returned by local SLM
         tool_calls: List[ToolCallRequest] = []

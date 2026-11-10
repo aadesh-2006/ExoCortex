@@ -24,7 +24,10 @@ from exocortex.execution.state import (
 from exocortex.execution.trace import ExecutionTrace
 from exocortex.schema import AgentDecision, StructuredStep
 from exocortex.slm.base import SLMMessage, SLMProvider, SLMResponse
-from exocortex.slm.local_provider import LocalServerSLMError
+from exocortex.slm.local_provider import (
+    LocalServerIncompleteGenerationError,
+    LocalServerSLMError,
+)
 from exocortex.slm.mock_provider import MockSLMProvider
 from exocortex.tools.base import BaseTool, PermissionLevel, ToolParameter, ToolResult
 from exocortex.tools.builtin import EchoTool, HealthCheckTool, SystemInfoTool
@@ -431,6 +434,36 @@ class TestExecutionEngine(unittest.TestCase):
         self.assertEqual(err_step.action_type, ActionType.ERROR)
         self.assertEqual(err_step.status, ExecutionStatus.ERROR)
         self.assertIn("Simulated Ollama server connection failure", err_step.error_message)
+
+        # 3. Provider generate must be called only ONCE (zero repair retries)
+        self.assertEqual(mock_slm.generate.call_count, 1)
+
+    def test_incomplete_generation_terminates_execution_cleanly(self):
+        """Verify token-budget exhaustion terminates execution with ERROR status without triggering JSON repair."""
+        mock_slm = MagicMock(spec=SLMProvider)
+        mock_slm.is_available.return_value = True
+        mock_slm.get_model_info.return_value = {"provider": "Mock"}
+        mock_slm.generate.side_effect = LocalServerIncompleteGenerationError(
+            "Local SLM server exhausted completion token budget (finish_reason='length') before final decision content was produced (max_tokens=512)."
+        )
+
+        executor = AgentExecutor(
+            slm_provider=mock_slm,
+            tool_registry=self.registry,
+        )
+        trace = executor.execute("Perform agent action")
+
+        # 1. State must be ERROR
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIn("SLM Generation Error: Local SLM server exhausted completion token budget", trace.error_message)
+        self.assertIsNone(trace.final_response)
+
+        # 2. Must record exactly 1 error step
+        self.assertEqual(len(trace.steps), 1)
+        err_step = trace.steps[0]
+        self.assertEqual(err_step.action_type, ActionType.ERROR)
+        self.assertEqual(err_step.status, ExecutionStatus.ERROR)
+        self.assertIn("exhausted completion token budget", err_step.error_message)
 
         # 3. Provider generate must be called only ONCE (zero repair retries)
         self.assertEqual(mock_slm.generate.call_count, 1)

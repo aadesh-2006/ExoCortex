@@ -15,6 +15,7 @@ from exocortex.slm.factory import get_slm_provider
 from exocortex.slm.local_model_engine import LocalSLMProvider
 from exocortex.slm.local_provider import (
     LocalServerConnectionError,
+    LocalServerIncompleteGenerationError,
     LocalServerSLMError,
     LocalServerSLMProvider,
     LocalServerTimeoutError,
@@ -312,6 +313,85 @@ class TestLocalServerSLMProvider(unittest.TestCase):
 
         self.assertIn("without choices", str(ctx.exception))
         self.assertIn("GPU OOM", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_incomplete_generation_empty_content_raises_error(self, mock_urlopen):
+        fake_api_response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning": "Thinking that consumed all tokens...",
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 512},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        with self.assertRaises(LocalServerIncompleteGenerationError) as ctx:
+            self.provider.generate("Test prompt", max_tokens=512)
+
+        self.assertIn("finish_reason='length'", str(ctx.exception))
+        self.assertIn("exhausted completion token budget", str(ctx.exception))
+        self.assertIn("max_tokens=512", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, LocalServerSLMError)
+
+    @patch("urllib.request.urlopen")
+    def test_incomplete_generation_partial_content_raises_error(self, mock_urlopen):
+        fake_api_response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"thought_summary": "Truncated json',
+                    },
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 512},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        with self.assertRaises(LocalServerIncompleteGenerationError) as ctx:
+            self.provider.generate("Test prompt", max_tokens=512)
+
+        self.assertIn("output was truncated", str(ctx.exception))
+        self.assertIn("finish_reason='length'", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, LocalServerSLMError)
+
+    @patch("urllib.request.urlopen")
+    def test_normal_response_finish_reason_stop(self, mock_urlopen):
+        fake_api_response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"thought_summary": "Done", "intent": "complete", "steps": []}',
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 30},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        res = self.provider.generate("Test prompt")
+        self.assertIsInstance(res, SLMResponse)
+        self.assertIn("Done", res.content)
+        self.assertEqual(res.prompt_tokens, 20)
+        self.assertEqual(res.completion_tokens, 30)
 
 
 if __name__ == "__main__":
