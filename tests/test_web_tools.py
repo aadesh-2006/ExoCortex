@@ -4,6 +4,7 @@ Unit and security tests for FetchWebPageTool and web fetch primitives.
 
 import io
 import socket
+import ssl
 import unittest
 import urllib.error
 import urllib.request
@@ -294,6 +295,136 @@ class TestFetchWebPageTool(unittest.TestCase):
             self.assertNotIn("Cookie", called_req.headers)
             self.assertNotIn("Authorization", called_req.headers)
             self.assertIn("ExoCortex-Agent", called_req.headers.get("User-agent"))
+
+    def test_dns_rebinding_connection_pinned_to_validated_ip(self):
+        """
+        Verify DNS rebinding / TOCTOU defense:
+        Validation returns public IP (93.184.216.34). Even if subsequent DNS resolutions
+        would return loopback (127.0.0.1), the actual socket connection is pinned to the
+        validated public IP and never connects to loopback.
+        """
+        mock_sock = MagicMock()
+        mock_sock_class = MagicMock(return_value=mock_sock)
+
+        dns_side_effects = [
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))],
+            [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))],
+        ]
+
+        mock_sock.makefile.return_value.readline.side_effect = [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: text/html\r\n",
+            b"Content-Length: 32\r\n",
+            b"\r\n",
+        ]
+        mock_sock.makefile.return_value.read.side_effect = [
+            b"<html><body>Public Safe</body></html>",
+            b"",
+        ]
+
+        with patch("socket.getaddrinfo", side_effect=dns_side_effects) as mock_dns, \
+             patch("socket.socket", mock_sock_class):
+            result = self.tool.run(url="http://rebind.attacker.com/status")
+
+            # Socket MUST connect to the validated public IP, never to 127.0.0.1
+            mock_sock.connect.assert_called_once_with(("93.184.216.34", 80))
+            self.assertNotEqual(mock_sock.connect.call_args[0][0], ("127.0.0.1", 80))
+            self.assertTrue(result.success)
+            self.assertIn("Public Safe", result.output)
+
+    def test_https_connection_pins_tcp_and_preserves_sni_and_host(self):
+        """
+        Verify that for HTTPS connections:
+        - The TCP socket connects directly to the pinned IP (93.184.216.34, 443).
+        - TLS SNI and cert check (wrap_socket) use the original domain name (secure.example.com).
+        - HTTP Host header is set to the original domain name.
+        """
+        mock_raw_sock = MagicMock()
+        mock_ssl_sock = MagicMock()
+        mock_sock_class = MagicMock(return_value=mock_raw_sock)
+
+        mock_ssl_sock.makefile.return_value.readline.side_effect = [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: text/html\r\n",
+            b"Content-Length: 36\r\n",
+            b"\r\n",
+        ]
+        mock_ssl_sock.makefile.return_value.read.side_effect = [
+            b"<html><body>Secure</body></html>",
+            b"",
+        ]
+
+        with patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]), \
+             patch("socket.socket", mock_sock_class), \
+             patch.object(ssl.SSLContext, "wrap_socket", return_value=mock_ssl_sock) as mock_wrap:
+            result = self.tool.run(url="https://secure.example.com/data")
+
+            # Verify TCP connected to pinned IP
+            mock_raw_sock.connect.assert_called_once_with(("93.184.216.34", 443))
+
+            # Verify wrap_socket was called with original hostname for SNI and cert validation
+            mock_wrap.assert_called_once_with(
+                mock_raw_sock,
+                server_hostname="secure.example.com",
+            )
+            self.assertTrue(result.success)
+            self.assertIn("Secure", result.output)
+
+    def test_redirect_pins_each_hop_independently(self):
+        """
+        Verify that in a redirect flow:
+        - Hop 1 connects TCP to Hop 1's validated IP (93.184.216.34).
+        - Hop 2 connects TCP to Hop 2's independently validated IP (151.101.1.69).
+        """
+        mock_sock_hop1 = MagicMock()
+        mock_sock_hop2 = MagicMock()
+        socket_instances = [mock_sock_hop1, mock_sock_hop2]
+
+        def socket_factory(*args, **kwargs):
+            if socket_instances:
+                return socket_instances.pop(0)
+            return MagicMock()
+
+        # Hop 1 response is a 302 redirect
+        mock_sock_hop1.makefile.return_value.readline.side_effect = [
+            b"HTTP/1.1 302 Found\r\n",
+            b"Location: http://target.example.org/destination\r\n",
+            b"Content-Length: 0\r\n",
+            b"\r\n",
+        ]
+        mock_sock_hop1.makefile.return_value.read.return_value = b""
+
+        # Hop 2 response is a 200 OK
+        mock_sock_hop2.makefile.return_value.readline.side_effect = [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: text/html\r\n",
+            b"Content-Length: 38\r\n",
+            b"\r\n",
+        ]
+        mock_sock_hop2.makefile.return_value.read.side_effect = [
+            b"<html><body>Redirected</body></html>",
+            b"",
+        ]
+
+        def mock_dns(host, port, *args, **kwargs):
+            if "initial.example.com" in host:
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+            if "target.example.org" in host:
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.69", port))]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", port))]
+
+        with patch("socket.getaddrinfo", side_effect=mock_dns), \
+             patch("socket.socket", side_effect=socket_factory):
+            result = self.tool.run(url="http://initial.example.com/start")
+
+            # Hop 1 socket must connect to 93.184.216.34:80
+            mock_sock_hop1.connect.assert_called_once_with(("93.184.216.34", 80))
+            # Hop 2 socket must connect to 151.101.1.69:80
+            mock_sock_hop2.connect.assert_called_once_with(("151.101.1.69", 80))
+
+            self.assertTrue(result.success)
+            self.assertIn("Redirected", result.output)
+            self.assertEqual(result.data["url"], "http://target.example.org/destination")
 
 
 if __name__ == "__main__":

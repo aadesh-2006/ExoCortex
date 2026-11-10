@@ -6,7 +6,14 @@ Provides secure, read-only web research tools, URL sanitizers, SSRF defenses, an
 
 from __future__ import annotations
 
-from exocortex.tools.web.fetch import FetchWebPageTool
+from exocortex.tools.web.fetch import (
+    FetchWebPageTool,
+    PinnedHTTPConnection,
+    PinnedHTTPSConnection,
+    PinnedHTTPHandler,
+    PinnedHTTPSHandler,
+    build_pinned_opener,
+)
 from exocortex.tools.web.parser import (
     SafeHTMLTextExtractor,
     extract_readable_text,
@@ -48,6 +55,11 @@ __all__ = [
     "extract_readable_text",
     "SafeHTMLTextExtractor",
     "FetchWebPageTool",
+    "PinnedHTTPConnection",
+    "PinnedHTTPSConnection",
+    "PinnedHTTPHandler",
+    "PinnedHTTPSHandler",
+    "build_pinned_opener",
     "WebSearchTool",
     "DDGSearchResultParser",
 ]

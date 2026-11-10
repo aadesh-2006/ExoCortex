@@ -7,7 +7,11 @@ content-type checks, timeout bounds, and safe HTML text extraction without execu
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import logging
+import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,6 +60,122 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    """
+    HTTPConnection that pins the socket connection directly to verified_ip,
+    eliminating secondary DNS resolution and DNS rebinding / TOCTOU attacks.
+    Preserves the original hostname for the HTTP Host header.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: Optional[int] = None,
+        *,
+        verified_ip: str,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(host, port=port, **kwargs)
+        self.verified_ip = verified_ip
+
+    def connect(self) -> None:
+        ip_obj = ipaddress.ip_address(self.verified_ip)
+        family = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(self.timeout)
+            if self.source_address:
+                sock.bind(self.source_address)
+            sock.connect((self.verified_ip, self.port))
+            self.sock = sock
+        except Exception:
+            sock.close()
+            raise
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """
+    HTTPSConnection that pins the TCP socket to verified_ip,
+    eliminating secondary DNS resolution and DNS rebinding / TOCTOU attacks,
+    while preserving original hostname for TLS SNI and certificate validation.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: Optional[int] = None,
+        *,
+        verified_ip: str,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(host, port=port, **kwargs)
+        self.verified_ip = verified_ip
+
+    def connect(self) -> None:
+        ip_obj = ipaddress.ip_address(self.verified_ip)
+        family = socket.AF_INET6 if ip_obj.version == 6 else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            if self.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(self.timeout)
+            if self.source_address:
+                sock.bind(self.source_address)
+            sock.connect((self.verified_ip, self.port))
+            self.sock = sock
+
+            server_hostname = self._tunnel_host if self._tunnel_host else self.host
+            self.sock = self._context.wrap_socket(
+                self.sock,
+                server_hostname=server_hostname,
+            )
+        except Exception:
+            sock.close()
+            raise
+
+
+class PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """Urllib HTTPHandler using PinnedHTTPConnection."""
+
+    def __init__(self, verified_ip: str) -> None:
+        super().__init__()
+        self.verified_ip = verified_ip
+
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(
+            lambda host, **kwargs: PinnedHTTPConnection(host, verified_ip=self.verified_ip, **kwargs),
+            req,
+        )
+
+
+class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    """Urllib HTTPSHandler using PinnedHTTPSConnection with TLS verification."""
+
+    def __init__(self, verified_ip: str, context: Optional[ssl.SSLContext] = None) -> None:
+        super().__init__(context=context)
+        self.verified_ip = verified_ip
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(
+            lambda host, **kwargs: PinnedHTTPSConnection(
+                host, verified_ip=self.verified_ip, context=self._context, **kwargs
+            ),
+            req,
+        )
+
+
+def build_pinned_opener(verified_ip: str) -> urllib.request.OpenerDirector:
+    """
+    Construct a dedicated urllib opener that disables automatic redirects
+    and pins HTTP and HTTPS connections to verified_ip.
+    """
+    return urllib.request.build_opener(
+        NoRedirectHandler,
+        PinnedHTTPHandler(verified_ip),
+        PinnedHTTPSHandler(verified_ip),
+    )
+
+
 class FetchWebPageTool(BaseTool):
     """
     Safe, read-only web page fetcher.
@@ -88,8 +208,13 @@ class FetchWebPageTool(BaseTool):
         ),
     ]
 
-    def _create_opener(self) -> urllib.request.OpenerDirector:
-        """Create a dedicated urllib opener that does not follow redirects automatically."""
+    def _create_opener(self, verified_ip: Optional[str] = None) -> urllib.request.OpenerDirector:
+        """
+        Create a dedicated urllib opener that does not follow redirects automatically
+        and optionally pins connections to verified_ip to eliminate DNS rebinding / TOCTOU.
+        """
+        if verified_ip:
+            return build_pinned_opener(verified_ip)
         return urllib.request.build_opener(NoRedirectHandler)
 
     def _fetch_url_content(
@@ -99,11 +224,10 @@ class FetchWebPageTool(BaseTool):
     ) -> Tuple[bool, str, Dict[str, Any], Optional[str]]:
         """
         Execute safe HTTP GET with pre-request SSRF validation, manual redirect auditing,
-        and response byte capping.
+        connection IP pinning to eliminate TOCTOU / DNS rebinding, and response byte capping.
         """
         current_url = target_url
         redirect_history: List[str] = []
-        opener = self._create_opener()
 
         for redirect_count in range(MAX_REDIRECTS + 1):
             # 1. Security & SSRF Validation BEFORE any network connection
@@ -127,7 +251,10 @@ class FetchWebPageTool(BaseTool):
                 },
             )
 
-            # 3. Perform network GET request
+            # 3. Create dedicated opener pinned to the verified IP for this specific hop
+            opener = self._create_opener(verified_ip=verified_ip)
+
+            # 4. Perform network GET request
             try:
                 response = opener.open(
                     req,
