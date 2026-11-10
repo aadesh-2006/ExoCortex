@@ -225,26 +225,59 @@ class COMSession:
     """Manages thread COM apartment initialization and desktop accessibility."""
 
     def __init__(self) -> None:
-        self.should_uninitialize = False
+        self.should_uninitialize: bool = False
+        self._switched_desktop: bool = False
+        self._h_desk: Optional[int] = None
+        self._orig_desk: Optional[int] = None
 
     def __enter__(self) -> COMSession:
         _configure_win32_signatures()
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
 
-        # Ensure background thread desktop has access to Default desktop if needed
-        h_desk = None
+        user32.GetThreadDesktop.restype = wintypes.HDESK
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        kernel32.GetCurrentThreadId.argtypes = []
+        user32.GetUserObjectInformationW.restype = wintypes.BOOL
+        user32.GetUserObjectInformationW.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.OpenDesktopW.restype = wintypes.HDESK
+        user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
+        user32.SetThreadDesktop.argtypes = [wintypes.HDESK]
+        user32.CloseDesktop.restype = wintypes.BOOL
+        user32.CloseDesktop.argtypes = [wintypes.HDESK]
+
+        # Check if the thread is already on the interactive Default desktop
+        UOI_NAME = 2
         try:
-            h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
-            if h_desk:
-                user32.SetThreadDesktop(h_desk)
-        except Exception:
-            pass
-        finally:
-            if h_desk:
-                try:
-                    user32.CloseDesktop(h_desk)
-                except Exception:
-                    pass
+            tid = kernel32.GetCurrentThreadId()
+            self._orig_desk = user32.GetThreadDesktop(tid)
+            buf = ctypes.create_unicode_buffer(256)
+            needed = wintypes.DWORD(0)
+            if user32.GetUserObjectInformationW(self._orig_desk, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+                current_desk_name = buf.value.strip().lower()
+            else:
+                current_desk_name = ""
+
+            if current_desk_name != "default":
+                # Background runner or service desktop: safely switch to interactive Default desktop
+                h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+                if h_desk:
+                    if user32.SetThreadDesktop(h_desk):
+                        self._switched_desktop = True
+                        self._h_desk = h_desk
+                    else:
+                        # Could not switch desktop (e.g. thread already has windows or hooks)
+                        user32.CloseDesktop(h_desk)
+        except Exception as e:
+            logger.debug("Desktop inspection/switching skipped or failed: %s", e)
 
         ole32 = ctypes.windll.ole32
         ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
@@ -259,16 +292,46 @@ class COMSession:
             # Thread is already in MTA mode; do NOT call CoUninitialize
             self.should_uninitialize = False
         else:
+            # If CoInitializeEx failed and we switched desktop, restore original desktop immediately
+            if self._switched_desktop and self._orig_desk:
+                try:
+                    user32.SetThreadDesktop(self._orig_desk)
+                except Exception:
+                    pass
+                if self._h_desk:
+                    try:
+                        user32.CloseDesktop(self._h_desk)
+                    except Exception:
+                        pass
+                self._switched_desktop = False
             raise RuntimeError(f"CoInitializeEx failed with HRESULT 0x{hr_u:08X}")
 
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        user32 = ctypes.windll.user32
+
+        # 1. Uninitialize COM first while still in the apartment
         if self.should_uninitialize:
             try:
                 ctypes.windll.ole32.CoUninitialize()
             except Exception as e:
                 logger.debug("CoUninitialize error: %s", e)
+
+        # 2. Restore original thread desktop and close opened desktop handle
+        if self._switched_desktop:
+            if self._orig_desk:
+                try:
+                    user32.SetThreadDesktop(self._orig_desk)
+                except Exception as e:
+                    logger.debug("Failed to restore original thread desktop: %s", e)
+            if self._h_desk:
+                try:
+                    user32.CloseDesktop(self._h_desk)
+                except Exception as e:
+                    logger.debug("Failed to close desktop handle: %s", e)
+            self._switched_desktop = False
+
 
 
 class InspectWindowUIElementsTool(BaseTool):

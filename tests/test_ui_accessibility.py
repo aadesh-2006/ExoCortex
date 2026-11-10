@@ -151,6 +151,56 @@ class TestCOMSession(unittest.TestCase):
         self.assertIn("CoInitializeEx failed", str(ctx.exception))
         mock_uninit.assert_not_called()
 
+    @patch("ctypes.windll.ole32.CoInitializeEx", return_value=S_OK)
+    @patch("ctypes.windll.ole32.CoUninitialize")
+    @patch("ctypes.windll.user32.OpenDesktopW")
+    @patch("ctypes.windll.user32.SetThreadDesktop")
+    @patch("ctypes.windll.user32.CloseDesktop")
+    @patch("ctypes.windll.user32.GetUserObjectInformationW")
+    def test_desktop_switching_lifecycle(self, mock_uoi, mock_close, mock_set, mock_open, mock_uninit, mock_init):
+        """Verify non-default desktop triggers switch, and restores original desktop + closes handle upon exit."""
+        mock_open.return_value = 0x9999
+        mock_set.return_value = 1
+
+        def fake_uoi(handle, nindex, buf, length, needed):
+            if buf:
+                buf.value = "custom_desk"
+            return 1
+
+        mock_uoi.side_effect = fake_uoi
+
+        with COMSession() as session:
+            self.assertTrue(session._switched_desktop)
+            self.assertEqual(session._h_desk, 0x9999)
+
+        # On exit, SetThreadDesktop must restore original desktop, and CloseDesktop must close h_desk
+        mock_set.assert_has_calls([call(0x9999), call(session._orig_desk)])
+        mock_close.assert_called_once_with(0x9999)
+
+    @patch("ctypes.windll.ole32.CoInitializeEx", return_value=S_OK)
+    @patch("ctypes.windll.ole32.CoUninitialize")
+    @patch("ctypes.windll.user32.OpenDesktopW")
+    @patch("ctypes.windll.user32.SetThreadDesktop")
+    @patch("ctypes.windll.user32.CloseDesktop")
+    @patch("ctypes.windll.user32.GetUserObjectInformationW")
+    def test_already_on_default_desktop_does_not_switch(self, mock_uoi, mock_close, mock_set, mock_open, mock_uninit, mock_init):
+        """Verify thread already on Default desktop skips OpenDesktopW and SetThreadDesktop."""
+        def fake_uoi(handle, nindex, buf, length, needed):
+            needed._obj.value = 16
+            if buf:
+                buf.value = "Default"
+            return 1
+
+        mock_uoi.side_effect = fake_uoi
+
+        with COMSession() as session:
+            self.assertFalse(session._switched_desktop)
+
+        mock_open.assert_not_called()
+        mock_set.assert_not_called()
+        mock_close.assert_not_called()
+
+
 
 class TestInspectWindowUIElementsTool(unittest.TestCase):
     """Unit tests for tool schema, permissions, and inspection execution."""
