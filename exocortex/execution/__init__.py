@@ -16,6 +16,7 @@ from exocortex.execution.executor import (
 from exocortex.execution.fast_path import (
     CANONICAL_FAST_PATH_MAP,
     FAST_PATH_ELIGIBLE_TOOLS,
+    FAST_PATH_INTENT_MAP,
     FastPathRouter,
     normalize_fast_path_query,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "FastPathRouter",
     "CANONICAL_FAST_PATH_MAP",
     "FAST_PATH_ELIGIBLE_TOOLS",
+    "FAST_PATH_INTENT_MAP",
     "normalize_fast_path_query",
     "ExecutionState",
     "ExecutionStatus",
