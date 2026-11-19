@@ -56,7 +56,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  OS:                     {hw['os_name']} {hw['os_release']} ({hw['architecture']})")
     print(f"  Processor:              {hw['processor_name']}")
     print(f"  ARM64 Native:           {hw.get('is_arm64', False)}")
-    print(f"  Snapdragon CPU:         {'Detected' if hw['is_snapdragon_detected'] else 'Not Detected'}")
     print(f"  Memory (RAM):           {hw['available_memory_gb']:.1f} GB available / {hw['total_memory_gb']:.1f} GB total")
 
     print("\n[ONNX Runtime & Hardware Acceleration]")
@@ -65,7 +64,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  Configured Target:      {config.execution_provider}")
     print(f"  Selected Provider:      {slm.get('selected_provider', slm.get('execution_provider', 'CPUExecutionProvider'))}")
     print(f"  Active Provider:        {slm.get('execution_provider', 'CPUExecutionProvider')}")
-    print(f"  NPU Acceleration:       {'ACTIVE' if slm.get('is_npu_accelerated', False) else 'INACTIVE (CPU Fallback)'}")
     if slm.get("fallback_occurred"):
         print(f"  Fallback Notice:        {slm.get('fallback_reason')}")
 
@@ -119,7 +117,7 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 
 def cmd_hardware(args: argparse.Namespace) -> int:
-    """Inspect and display detailed hardware, NPU readiness, and runtime dispatch capabilities."""
+    """Inspect and display detailed hardware and runtime dispatch capabilities."""
     from exocortex.runtime.provider import RuntimeDispatcher
     config = get_config()
     runtime_prof = RuntimeDispatcher.get_runtime_profile(requested_target=config.execution_provider)
@@ -129,12 +127,11 @@ def cmd_hardware(args: argparse.Namespace) -> int:
         print(json.dumps(runtime_prof.to_dict(), indent=2))
         return 0
 
-    print(format_header("ExoCortex Hardware & Snapdragon Acceleration Profile"))
+    print(format_header("ExoCortex Hardware & Acceleration Profile"))
     print(f"Host OS:                   {runtime_prof.os_name} {runtime_prof.os_release} (v{runtime_prof.os_version})")
     print(f"Architecture:              {runtime_prof.architecture}")
     print(f"ARM64 Native:              {runtime_prof.is_arm64}")
     print(f"Processor:                 {runtime_prof.processor_name}")
-    print(f"Snapdragon Silicon:        {'Detected' if runtime_prof.is_snapdragon_detected else 'Not Detected'}")
     print(f"Total Physical Memory:     {runtime_prof.total_memory_gb:.2f} GB")
     print(f"Available Physical Memory: {runtime_prof.available_memory_gb:.2f} GB")
 
@@ -144,17 +141,6 @@ def cmd_hardware(args: argparse.Namespace) -> int:
     print(f"Configured Provider:       {runtime_prof.requested_provider}")
     print(f"Selected Provider:         {runtime_prof.selected_provider}")
     print(f"Active Provider:           {runtime_prof.active_provider}")
-
-    print("\n--- Qualcomm Snapdragon / QNN NPU Readiness ---")
-    npu = runtime_prof.npu
-    supported_str = "YES" if npu.is_supported else "NO (x86_64 / Intel Host)"
-    installed_str = "YES" if npu.is_installed else "NO (QNNExecutionProvider not in ORT)"
-    active_str = "YES (NPU Active)" if npu.is_active else "NO (CPU Fallback Active)"
-
-    print(f"Supported by Architecture: {supported_str}")
-    print(f"QNN Provider Installed:    {installed_str}")
-    print(f"NPU Acceleration Active:   {active_str}")
-    print(f"NPU Status Summary:        {npu.status_summary}")
 
     print("=" * 64 + "\n")
     return 0
@@ -175,7 +161,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     print(f"Model Name:              {res.model_name}")
     print(f"Requested Provider:      {res.requested_provider}")
     print(f"Execution Provider:      {res.execution_provider}")
-    print(f"NPU Accelerated:         {res.is_npu_accelerated}")
+    print(f"Hardware Accelerated:    {res.is_npu_accelerated}")
     if res.fallback_occurred:
         print(f"Fallback Reason:         {res.fallback_reason}")
     print(f"Model Load Time:         {res.model_load_time_ms:.1f} ms")
@@ -273,7 +259,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="exocortex",
-        description="ExoCortex: Local-First JARVIS-like PC Agent for Windows (Qualcomm Snapdragon Challenge)",
+        description="ExoCortex: Hardware-Agnostic, Local-First AI Agent for Windows",
     )
     parser.add_argument(
         "--version", "-v", action="version", version=f"ExoCortex v{exocortex.__version__}"
@@ -300,7 +286,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     tools_parser.set_defaults(func=cmd_tools)
 
     # Hardware command
-    hw_parser = subparsers.add_parser("hardware", help="Inspect hardware and Snapdragon acceleration")
+    hw_parser = subparsers.add_parser("hardware", help="Inspect hardware and execution acceleration")
     hw_parser.add_argument("--json", action="store_true", help="Output hardware profile in JSON format")
     hw_parser.set_defaults(func=cmd_hardware)
 

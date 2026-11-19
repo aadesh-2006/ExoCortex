@@ -1,7 +1,8 @@
 """
-ExoCortex: Local-First Autonomous Personal Computer Agent for Windows.
+ExoCortex: Hardware-Agnostic, Local-First AI Agent for Windows.
 
-Designed for the Qualcomm Snapdragon AI Lab Build & Present Challenge.
+Interprets natural-language requests, reasons through tasks,
+and executes them using permission-controlled desktop tools.
 """
 
 __version__ = "0.1.0"

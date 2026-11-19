@@ -1,9 +1,8 @@
 """
-ONNX Runtime SLM Provider with Snapdragon NPU / Qualcomm QNN acceleration.
+ONNX Runtime SLM Provider for ExoCortex.
 
 Designed to leverage ONNX Runtime execution providers:
-- QNNExecutionProvider (Qualcomm Snapdragon NPU / Hexagon)
-- DmlExecutionProvider (DirectML Windows GPU/NPU)
+- DmlExecutionProvider (DirectML Windows GPU/accelerator)
 - CPUExecutionProvider (Fallback)
 """
 
@@ -24,9 +23,9 @@ from exocortex.slm.base import (
 
 class ONNXRuntimeSLMProvider(SLMProvider):
     """
-    SLM Provider using ONNX Runtime with Qualcomm Snapdragon QNN or DirectML.
+    SLM Provider using ONNX Runtime with DirectML or CPU execution.
     
-    Supports loading ONNX models exported from Qualcomm AI Hub or Hugging Face Optimum.
+    Supports loading ONNX models exported from Hugging Face Optimum or standard ONNX export.
     """
 
     def __init__(
@@ -46,8 +45,6 @@ class ONNXRuntimeSLMProvider(SLMProvider):
         hw = detect_hardware()
         if requested == "auto":
             return hw.recommended_execution_provider
-        elif requested == "qnn":
-            return "QNNExecutionProvider"
         elif requested == "dml":
             return "DmlExecutionProvider"
         return "CPUExecutionProvider"
@@ -70,7 +67,8 @@ class ONNXRuntimeSLMProvider(SLMProvider):
             "model_path": self.model_path,
             "resolved_execution_provider": self.resolved_provider,
             "requested_execution_provider": self.requested_provider,
-            "is_npu_accelerated": self.resolved_provider in ("QNNExecutionProvider", "DmlExecutionProvider"),
+            "is_accelerated": self.resolved_provider != "CPUExecutionProvider",
+            "is_npu_accelerated": False,
             "is_local": True,
         }
 

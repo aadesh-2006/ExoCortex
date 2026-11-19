@@ -1,7 +1,7 @@
 """
-Hardware detection and Snapdragon NPU acceleration discovery for ExoCortex.
+Hardware detection and execution acceleration discovery for ExoCortex.
 
-Detects system architecture, Qualcomm Snapdragon NPU readiness, DirectML,
+Detects system architecture, memory capacity, DirectML acceleration,
 and available ONNX Runtime execution providers.
 """
 
@@ -23,9 +23,6 @@ class HardwareProfile:
     architecture: str
     processor_name: str
     is_arm64: bool
-    is_snapdragon_detected: bool
-    is_npu_available: bool
-    npu_name: Optional[str]
     available_execution_providers: List[str] = field(default_factory=list)
     recommended_execution_provider: str = "CPUExecutionProvider"
     total_memory_gb: float = 0.0
@@ -39,9 +36,6 @@ class HardwareProfile:
             "architecture": self.architecture,
             "processor_name": self.processor_name,
             "is_arm64": self.is_arm64,
-            "is_snapdragon_detected": self.is_snapdragon_detected,
-            "is_npu_available": self.is_npu_available,
-            "npu_name": self.npu_name,
             "available_execution_providers": self.available_execution_providers,
             "recommended_execution_provider": self.recommended_execution_provider,
             "total_memory_gb": round(self.total_memory_gb, 2),
@@ -92,7 +86,7 @@ def detect_memory_info() -> tuple[float, float]:
 
 
 def detect_hardware() -> HardwareProfile:
-    """Detect system hardware and Snapdragon NPU capabilities."""
+    """Detect host system hardware, architecture, and available execution providers."""
     os_name = platform.system()
     os_version = platform.version()
     os_release = platform.release()
@@ -100,38 +94,10 @@ def detect_hardware() -> HardwareProfile:
     proc = platform.processor()
 
     is_arm64 = "arm" in arch or "aarch64" in arch
-    is_snapdragon = (
-        "snapdragon" in proc.lower()
-        or "qualcomm" in proc.lower()
-        or "sc8380" in proc.lower()
-        or "x elite" in proc.lower()
-        or "x plus" in proc.lower()
-    )
-
     providers = detect_execution_providers()
 
-    # Determine NPU support: strictly require Snapdragon hardware AND QNN Execution Provider
-    has_qnn = "QNNExecutionProvider" in providers
     has_dml = "DmlExecutionProvider" in providers
-
-    is_npu_available = is_snapdragon and has_qnn
-    npu_name = None
-    if is_snapdragon and has_qnn:
-        npu_name = "Qualcomm Hexagon NPU (Snapdragon X Series - QNN Active)"
-    elif is_snapdragon:
-        npu_name = "Qualcomm Hexagon NPU (Requires onnxruntime-qnn)"
-    elif has_dml:
-        npu_name = "DirectML Neural Accelerator / GPU"
-    elif has_qnn:
-        npu_name = "QNN Execution Provider (Non-Snapdragon Host)"
-
-    # Select recommended provider
-    if has_qnn and is_snapdragon:
-        recommended_provider = "QNNExecutionProvider"
-    elif has_dml:
-        recommended_provider = "DmlExecutionProvider"
-    else:
-        recommended_provider = "CPUExecutionProvider"
+    recommended_provider = "DmlExecutionProvider" if has_dml else "CPUExecutionProvider"
 
     total_mem, avail_mem = detect_memory_info()
 
@@ -142,9 +108,6 @@ def detect_hardware() -> HardwareProfile:
         architecture=arch,
         processor_name=proc,
         is_arm64=is_arm64,
-        is_snapdragon_detected=is_snapdragon,
-        is_npu_available=is_npu_available,
-        npu_name=npu_name,
         available_execution_providers=providers,
         recommended_execution_provider=recommended_provider,
         total_memory_gb=total_mem,

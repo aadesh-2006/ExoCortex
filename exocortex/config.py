@@ -19,7 +19,7 @@ except ImportError:
     pass
 
 
-HardwareTarget = Literal["auto", "qnn", "dml", "cpu"]
+HardwareTarget = Literal["auto", "dml", "cpu"]
 SLMProviderType = Literal["mock", "onnx", "local_server", "llamacpp"]
 
 
@@ -70,7 +70,7 @@ class Settings:
         default_factory=lambda: os.getenv("EXOCORTEX_MODEL_PATH", "")
     )
 
-    # Hardware & Snapdragon Acceleration
+    # Hardware Acceleration & Execution Provider
     execution_provider: str = field(
         default_factory=lambda: os.getenv(
             "EXOCORTEX_EXECUTION_PROVIDER",

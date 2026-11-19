@@ -1,5 +1,5 @@
 """
-Unit and integration tests for Milestone 5 Snapdragon Hardware Acceleration and Runtime Dispatch.
+Unit and integration tests for Hardware Acceleration and Runtime Dispatch.
 """
 
 import unittest
@@ -8,12 +8,11 @@ from unittest.mock import MagicMock, patch
 
 from exocortex.benchmarking import BenchmarkResult, run_benchmark
 from exocortex.config import Settings
-from exocortex.runtime.capabilities import CapabilityStatus, NPUCapability, RuntimeProfile
+from exocortex.runtime.capabilities import CapabilityStatus, RuntimeProfile
 from exocortex.runtime.detector import (
     detect_available_providers,
-    detect_npu_capability,
+    detect_memory_gb,
     get_onnxruntime_version,
-    is_snapdragon_hardware,
 )
 from exocortex.runtime.provider import RuntimeDispatcher
 from exocortex.slm.base import SLMResponse
@@ -21,7 +20,7 @@ from exocortex.slm.mock_provider import MockSLMProvider
 
 
 class TestRuntimeDetection(unittest.TestCase):
-    """Test safe hardware, ORT, and NPU detection without crashing."""
+    """Test safe hardware, ORT, and execution provider detection without crashing."""
 
     def test_onnxruntime_version_detected(self):
         ver = get_onnxruntime_version()
@@ -33,69 +32,39 @@ class TestRuntimeDetection(unittest.TestCase):
         self.assertIsInstance(providers, list)
         self.assertIn("CPUExecutionProvider", providers)
 
-    def test_intel_host_detection(self):
-        """Verify Intel development machine does not claim Snapdragon hardware."""
-        with patch("platform.processor", return_value="Intel64 Family 6 Model 154 Stepping 3, GenuineIntel"), \
-             patch("platform.machine", return_value="AMD64"):
-            self.assertFalse(is_snapdragon_hardware())
-
-    def test_snapdragon_host_detection(self):
-        """Verify Qualcomm Snapdragon processor is recognized."""
-        with patch("platform.processor", return_value="Snapdragon(R) X Elite - X1E80100 - Qualcomm(R) Oryon(TM) CPU"), \
-             patch("platform.machine", return_value="ARM64"):
-            self.assertTrue(is_snapdragon_hardware())
-
-    def test_npu_capability_intel_machine(self):
-        """Verify NPU capability accurately reports UNAVAILABLE on Intel machine."""
-        with patch("exocortex.runtime.detector.is_snapdragon_hardware", return_value=False):
-            npu = detect_npu_capability(providers=["CPUExecutionProvider"])
-            self.assertFalse(npu.is_supported)
-            self.assertFalse(npu.is_installed)
-            self.assertFalse(npu.is_active)
-            self.assertIn("UNAVAILABLE", npu.status_summary)
-
-    def test_npu_capability_snapdragon_without_qnn(self):
-        """Verify Snapdragon hardware without QNN EP package is reported as SUPPORTED but not installed."""
-        with patch("exocortex.runtime.detector.is_snapdragon_hardware", return_value=True):
-            npu = detect_npu_capability(providers=["CPUExecutionProvider"])
-            self.assertTrue(npu.is_supported)
-            self.assertFalse(npu.is_installed)
-            self.assertFalse(npu.is_active)
-            self.assertIn("Requires onnxruntime-qnn", npu.npu_name)
-
-    def test_npu_capability_snapdragon_with_qnn(self):
-        """Verify Snapdragon hardware with QNN EP package is reported as READY."""
-        with patch("exocortex.runtime.detector.is_snapdragon_hardware", return_value=True):
-            npu = detect_npu_capability(providers=["QNNExecutionProvider", "CPUExecutionProvider"])
-            self.assertTrue(npu.is_supported)
-            self.assertTrue(npu.is_installed)
-            self.assertIn("READY", npu.status_summary)
+    def test_detect_memory_gb(self):
+        total, avail = detect_memory_gb()
+        self.assertGreater(total, 0.0)
+        self.assertGreater(avail, 0.0)
 
 
 class TestRuntimeDispatcher(unittest.TestCase):
     """Test deterministic execution provider resolution and fallback handling."""
 
-    def test_auto_on_intel_selects_cpu(self):
-        with patch("exocortex.runtime.provider.is_snapdragon_hardware", return_value=False):
-            ep, reason = RuntimeDispatcher.resolve_provider("auto", ["CPUExecutionProvider"])
-            self.assertEqual(ep, "CPUExecutionProvider")
-            self.assertIsNone(reason)
-
-    def test_auto_on_snapdragon_with_qnn_selects_qnn(self):
-        with patch("exocortex.runtime.provider.is_snapdragon_hardware", return_value=True):
-            ep, reason = RuntimeDispatcher.resolve_provider("auto", ["QNNExecutionProvider", "CPUExecutionProvider"])
-            self.assertEqual(ep, "QNNExecutionProvider")
-            self.assertIsNone(reason)
-
-    def test_explicit_cpu_target(self):
-        ep, reason = RuntimeDispatcher.resolve_provider("cpu", ["QNNExecutionProvider", "CPUExecutionProvider"])
+    def test_auto_selects_cpu_when_only_cpu_available(self):
+        ep, reason = RuntimeDispatcher.resolve_provider("auto", ["CPUExecutionProvider"])
         self.assertEqual(ep, "CPUExecutionProvider")
         self.assertIsNone(reason)
 
-    def test_explicit_qnn_when_missing(self):
-        """Verify explicit QNN request when QNN is missing gives warning reason."""
-        ep, reason = RuntimeDispatcher.resolve_provider("qnn", ["CPUExecutionProvider"])
-        self.assertEqual(ep, "QNNExecutionProvider")
+    def test_auto_selects_dml_when_available(self):
+        ep, reason = RuntimeDispatcher.resolve_provider("auto", ["DmlExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(ep, "DmlExecutionProvider")
+        self.assertIsNone(reason)
+
+    def test_explicit_cpu_target(self):
+        ep, reason = RuntimeDispatcher.resolve_provider("cpu", ["DmlExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(ep, "CPUExecutionProvider")
+        self.assertIsNone(reason)
+
+    def test_explicit_dml_when_available(self):
+        ep, reason = RuntimeDispatcher.resolve_provider("dml", ["DmlExecutionProvider", "CPUExecutionProvider"])
+        self.assertEqual(ep, "DmlExecutionProvider")
+        self.assertIsNone(reason)
+
+    def test_explicit_dml_when_missing(self):
+        """Verify explicit DML request when DML is missing gives warning reason."""
+        ep, reason = RuntimeDispatcher.resolve_provider("dml", ["CPUExecutionProvider"])
+        self.assertEqual(ep, "DmlExecutionProvider")
         self.assertIsNotNone(reason)
         self.assertIn("not available", reason)
 
@@ -108,12 +77,12 @@ class TestRuntimeDispatcher(unittest.TestCase):
         profile = RuntimeDispatcher.get_runtime_profile(
             requested_target="auto",
             active_provider="CPUExecutionProvider",
-            is_npu_active=False,
         )
         self.assertIsInstance(profile, RuntimeProfile)
         self.assertEqual(profile.active_provider, "CPUExecutionProvider")
-        self.assertFalse(profile.npu.is_active)
         self.assertIn("CPUExecutionProvider", profile.available_providers)
+        self.assertTrue(profile.total_memory_gb > 0)
+        self.assertTrue(profile.available_memory_gb > 0)
 
 
 class TestONNXEngineFallback(unittest.TestCase):
@@ -121,18 +90,18 @@ class TestONNXEngineFallback(unittest.TestCase):
 
     @patch("onnxruntime.InferenceSession")
     @patch("tokenizers.Tokenizer.from_file")
-    def test_qnn_initialization_failure_falls_back_to_cpu(self, mock_tok, mock_sess):
+    def test_provider_initialization_failure_falls_back_to_cpu(self, mock_tok, mock_sess):
         """
-        Verify that if QNN provider throws an exception during session creation,
+        Verify that if accelerator provider throws an exception during session creation,
         the engine catches it, logs a warning, and initializes with CPUExecutionProvider safely.
         """
-        # First call with QNN fails; second call with CPU succeeds
+        # First call with DML fails; second call with CPU succeeds
         mock_cpu_session = MagicMock()
         mock_cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
 
         def side_effect(path, sess_options=None, providers=None):
-            if providers and "QNNExecutionProvider" in providers:
-                raise RuntimeError("Failed to load QNN DLL: QnnHtp.dll not found")
+            if providers and "DmlExecutionProvider" in providers:
+                raise RuntimeError("Failed to load DirectML: DirectML.dll not found")
             return mock_cpu_session
 
         mock_sess.side_effect = side_effect
@@ -143,12 +112,12 @@ class TestONNXEngineFallback(unittest.TestCase):
             generator = ONNXNeuralGenerator(
                 model_path=Path("dummy/model.onnx"),
                 tokenizer_path=Path("dummy/tokenizer.json"),
-                execution_provider="qnn",
+                execution_provider="dml",
             )
             self.assertTrue(generator.fallback_occurred)
-            self.assertIn("QNN DLL", generator.fallback_reason)
+            self.assertIn("DirectML", generator.fallback_reason)
             self.assertEqual(generator.active_provider, "CPUExecutionProvider")
-            self.assertFalse(generator.is_npu_active)
+            self.assertFalse(generator.is_accelerated)
 
 
 class TestBenchmarkingLabels(unittest.TestCase):
@@ -156,6 +125,11 @@ class TestBenchmarkingLabels(unittest.TestCase):
 
     def test_cpu_benchmark_label(self):
         mock_slm = MockSLMProvider()
+        mock_slm.get_model_info = lambda: {
+            "model_name": "mock",
+            "execution_provider": "CPUExecutionProvider",
+            "is_npu_accelerated": False,
+        }
         res = run_benchmark(provider=mock_slm, prompts=["Test prompt"])
         self.assertEqual(res.benchmark_type, "CPU benchmark")
         self.assertFalse(res.is_npu_accelerated)

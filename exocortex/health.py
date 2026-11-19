@@ -62,8 +62,6 @@ def run_health_check() -> HealthReport:
 
     # 2. Hardware check
     checks["hardware_probed"] = True
-    if not hardware_profile.is_snapdragon_detected:
-        warnings.append("Qualcomm Snapdragon NPU not detected on current host; running CPU/DirectML emulation mode.")
 
     # 3. SLM check
     slm_ok = slm.is_available()

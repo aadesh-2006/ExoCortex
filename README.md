@@ -1,231 +1,263 @@
 # ExoCortex 🧠⚡
-**Local-First JARVIS-Like Autonomous Personal Computer Agent for Windows**  
-*Built for the Qualcomm Snapdragon AI Lab Build & Present Challenge*
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20ARM64%20%7C%20x64-blue.svg)](https://microsoft.com/windows)
-[![Qualcomm](https://img.shields.io/badge/Hardware-Snapdragon%20X%20Elite%20%7C%20NPU-FF6600.svg)](https://www.qualcomm.com/products/mobile/snapdragon)
+**Hardware-Agnostic, Local-First AI Agent for Windows**
+
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Windows%2010-blue.svg)](https://microsoft.com/windows)
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Milestone%205-Completed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-244%20Passed-brightgreen.svg)]()
+
+ExoCortex is a hardware-agnostic, local-first AI agent for Windows that interprets natural-language requests, reasons through tasks, and executes them using permission-controlled desktop tools.
+
+Unlike cloud-dependent conversational bots or unconstrained scripting assistants, ExoCortex runs entirely on-device, enforces a strict three-tier security permission model, and interacts with the operating system exclusively through typed, schema-validated tools.
 
 ---
 
-## 1. Project Overview
+## Key Highlights
 
-**ExoCortex** is an autonomous, local-first personal computer assistant engineered specifically for **Windows** and optimized for **Qualcomm Snapdragon-powered Copilot+ PCs** (such as HP Snapdragon laptops). 
-
-Unlike cloud-dependent conversational bots, ExoCortex functions as an intelligent cognitive layer residing directly on the user's computer. It receives natural-language user intentions, formulates structured multi-step execution plans, interacts with the Windows OS through strictly typed tools, observes the resulting state, and autonomously drives tasks to completion—all while keeping user data 100% private and on-device.
-
----
-
-## 2. Problem Statement
-
-Modern AI assistants and computer-use tools suffer from critical drawbacks:
-1. **Cloud Latency & Privacy Risks**: Transmitting screen pixels, file hierarchies, and private user communications to external cloud servers introduces severe latency, high operational costs, and catastrophic privacy risks.
-2. **Heavyweight LLMs & Battery Drain**: Traditional Large Language Models (70B+) require massive cloud server farms or heavy discrete GPUs that quickly drain laptop battery.
-3. **Lack of Hardware-Aware Agent Architectures**: Existing agents treat hardware as a black box rather than leveraging dedicated on-device Neural Processing Units (NPUs) built into modern laptops.
-4. **Unsafe Shell & Script Execution**: Agents that execute unrestricted bash, PowerShell, or command strings introduce severe security risks and unintended destructive actions.
+- **100% On-Device & Private**: Zero cloud AI APIs, zero external telemetry, zero prompt or desktop data leakage. All reasoning and tool executions execute locally.
+- **Hardware-Agnostic Execution**: Seamlessly operates on standard x86_64 CPUs, ARM64 devices, or Windows systems with DirectML hardware acceleration.
+- **Dual Inference Engine Support**:
+  - **Local Server Runtime**: Compatible with local OpenAI-compatible endpoints such as Ollama running **Qwen3:4B** or similar Small Language Models (SLMs).
+  - **Embedded ONNX Runtime**: Embedded neural execution with KV-caching, auto-selecting DirectML acceleration or CPU execution.
+- **Read-Only Desktop & OS Awareness**: Native Win32 window enumeration, UI Automation element tree inspection via Windows Accessibility APIs, and running process telemetry.
+- **Two-Tier Execution Optimization**:
+  - **Deterministic Fast Path**: Sub-millisecond dispatch for unambiguous canonical queries (e.g., listing windows, inspecting processes, querying system diagnostics), bypassing model inference entirely (0 LLM calls).
+  - **Direct Observation Completion**: Automatically completes single-tool desktop inspections upon successful observation, eliminating redundant synthesis calls.
+- **Strict Permission & Sandbox Boundaries**: Read-only tools execute safely; state-modifying actions require explicit authorization; filesystem operations are sandboxed to `~/.exocortex/workspace`.
+- **Bounded Autonomous Reasoning**: Multi-step iterative cognitive loop featuring loop detection, maximum step limits, and comprehensive JSON telemetry traces.
 
 ---
 
-## 3. Project Vision
+## Architecture
 
-ExoCortex is envisioned as a **JARVIS-like copilot for Windows**:
-- **Natural Interaction**: Understands conversational, contextual instructions from the user.
-- **Autonomous Multi-Step Execution**: Decomposes ambiguous goals into discrete tool actions and system interactions.
-- **Safe Desktop Automation**: All OS capabilities are exposed through typed, sandboxed tool definitions—preventing arbitrary command injection.
-- **Edge Efficiency**: Powered by Small Language Models (SLMs) accelerated on **Qualcomm Hexagon NPUs**, providing sub-second latency and all-day battery efficiency.
-
----
-
-## 4. Architecture & Safe Agentic Execution Loop (Milestone 4)
-
-ExoCortex implements a bounded, safe, iterative cognitive loop:
+ExoCortex is organized into four decoupled layers: Interface, Execution Engine, Reasoning Brain, and Tool Registry.
 
 ```mermaid
 flowchart TD
-    User([User Natural Language Goal]) --> CLI[ExoCortex CLI / Interface]
-    CLI --> AgentCore[ExoCortexAgent Core]
-    AgentCore --> Executor[AgentExecutor Engine]
-    
-    subgraph Cognitive Loop [Multi-Step Cognitive Execution Loop]
-        Executor --> SLM[Local SLM Brain (Qwen2.5-0.5B ONNX)]
-        SLM --> StructuredDec[Strict Structured Decision (AgentDecision)]
-        StructuredDec --> Validator[Schema & Tool Validator]
-        Validator --> LoopCheck{Loop / Step Limits OK?}
-        LoopCheck -- Exceeded --> StopLoop[Halt: MAX_STEPS / LOOP_DETECTED]
-        LoopCheck -- OK --> PermCheck{Permission & Confirmation Check}
-        PermCheck -- Requires Confirm --> PauseConfirm[Pause: CONFIRMATION_REQUIRED]
-        PermCheck -- Safe / Approved --> ToolReg[ToolRegistry.execute]
-        ToolReg --> WinTools[Safe Windows OS Tool Suite]
-        WinTools --> WinOS[Windows OS / Subsystems]
-        WinOS --> Observation[Tool Observation (Bounded <= 2,000 Chars)]
-        Observation --> HistTracker[Append Step to Execution History]
-        HistTracker --> CheckGoal{Has More Steps?}
-        CheckGoal -- Yes --> SLM
-        CheckGoal -- No / Complete --> FinalResponse[Synthesize Final Response]
+    User["User Natural Language Request"] --> AgentCore["ExoCortexAgent.run()"]
+
+    subgraph Routing ["Deterministic Routing Layer"]
+        AgentCore --> FastPath{"Fast-Path Eligible?"}
+        FastPath -- "Yes (Canonical Phrase)" --> FastExec["Direct Tool Execution (0 LLM Calls)"]
+        FastExec --> FastTrace["ExecutionTrace (Duration < 1 ms)"]
     end
 
-    FinalResponse --> Trace[ExecutionTrace Telemetry & Summary]
-    Trace --> UserOutput([User Output])
+    FastPath -- "No (Fall Through)" --> Executor["AgentExecutor.execute()"]
 
-    subgraph Runtime Dispatch [Hardware-Aware Runtime Dispatch Layer]
-        SLM --> Dispatcher[RuntimeDispatcher]
-        Dispatcher --> HWDetect[Hardware & NPU Detector]
-        HWDetect --> QNN{Snapdragon + QNN Available?}
-        QNN -- Yes --> QNN_EP[QNNExecutionProvider (Hexagon NPU)]
-        QNN -- No / Failure --> CPU_EP[CPUExecutionProvider (Fallback)]
+    subgraph CognitiveLoop ["Bounded Iterative Cognitive Loop"]
+        Executor --> SLM["Local SLM Inference (Ollama / ONNX)"]
+        SLM --> StructuredDec["Structured Decision (AgentDecision JSON)"]
+        StructuredDec --> Validator["Schema & Tool Registry Validation"]
+        Validator --> LoopCheck{"Loop Tracker & Step Bounds OK?"}
+        LoopCheck -- "Max Steps / Loop Detected" --> Halt["Halt: Error Trace"]
+        LoopCheck -- "Within Bounds" --> PermCheck{"Permission Gate"}
+        PermCheck -- "Confirmation Required" --> PauseConfirm["Pause: Await Approval"]
+        PermCheck -- "SAFE / Approved" --> ToolReg["ToolRegistry.execute()"]
+        ToolReg --> Tools["Windows Desktop & OS Tool Suite"]
+        Tools --> ToolRes["Tool Result & Bounded Observation"]
+        ToolRes --> DirectCheck{"Direct Observation Eligible?"}
+        DirectCheck -- "Yes (Single Desktop Tool)" --> DirectDone["Complete Execution (1 LLM Call Total)"]
+        DirectCheck -- "No / Multi-Step" --> History["Append to History & Continue"]
+        History --> SLM
     end
+
+    FastTrace --> Output(["Final Response & Telemetry"])
+    DirectDone --> Output
+    Halt --> Output
 ```
 
 ---
 
-## 5. Model Selection & Rationale (Milestone 2)
+## Tool Registry & Security Boundaries
 
-For the core reasoning brain, we evaluated practical open-source SLM candidates:
+ExoCortex never executes arbitrary shell commands or unvalidated scripts. Every capability is exposed as a typed `BaseTool` governed by one of three permission levels:
 
-| Candidate Model | Parameter Count | RAM Footprint | JSON / Tool Calling | License | Assessment for ExoCortex MVP |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Qwen2.5-0.5B-Instruct** | **490M** | **~350 MB** | **Excellent** | **Apache 2.0** | **Selected Primary MVP Model**: Ultra-compact, sub-second CPU latency, zero memory pressure. |
-| **Qwen2.5-1.5B-Instruct** | 1.54B | ~900 MB | Exceptional | Apache 2.0 | High-accuracy tier for complex multi-step reasoning. |
-| **Phi-3.5-mini-instruct** | 3.82B | ~2.5 GB (INT4) | Very Good | MIT | Supported via ONNX provider for higher-capacity hosts. |
-| **Llama-3.2-1B-Instruct** | 1.23B | ~800 MB | Good | Llama Community | Strong baseline; custom license constraints. |
+| Permission Level | Enforcement Policy | Registered Tools |
+|---|---|---|
+| **`SAFE`** | Read-only inspection; executes immediately without prompting. | `list_open_windows`, `inspect_window_ui_elements`, `list_processes`, `system_info`, `health_check`, `echo`, `list_directory`, `read_text_file`, `web_search`, `fetch_web_page` |
+| **`CONFIRMATION_REQUIRED`** | Modifies state, launches processes, or accesses external URLs; requires user confirmation callback. | `launch_application` (allowlisted apps), `open_url` (scheme-validated HTTP/HTTPS), `create_directory` |
+| **`RESTRICTED`** | Destructive actions, system configurations, or arbitrary execution; blocked by default. | *Prohibited in ExoCortex core architecture.* |
+
+### Built-in Tool Suite
+
+1. **Desktop Awareness**:
+   - `list_open_windows`: Enumerates visible top-level application windows using Win32 `EnumWindows` and `DwmGetWindowAttribute` APIs, safely filtering cloaked and hidden background processes.
+   - `inspect_window_ui_elements`: Inspects the interactive UI Automation element tree of a target window via Windows Accessibility APIs, bounded by depth and element count limits.
+   - `list_processes`: Inspects running system processes with PID, executable name, and memory telemetry.
+2. **Workspace Filesystem**:
+   - `list_directory`: Lists directory contents strictly confined inside `~/.exocortex/workspace`. Directory traversal (`..`) is strictly blocked.
+   - `read_text_file`: Reads text files inside the workspace sandbox (up to 1 MB).
+   - `create_directory`: Creates subdirectories inside the workspace sandbox.
+3. **Application & Web Operations**:
+   - `launch_application`: Launches allowlisted desktop utilities (e.g., `notepad`, `calc`, `mspaint`, `explorer`). Arbitrary executable paths are rejected.
+   - `open_url`: Opens validated `http://` and `https://` URLs in the default browser. Dangerous schemes (`file://`, `javascript:`, `data:`) are rejected.
+   - `web_search`: Queries DuckDuckGo HTML search for public research queries without browser automation overhead.
+   - `fetch_web_page`: Fetches and extracts readable text from public web pages.
+4. **System Diagnostics**:
+   - `system_info`: Inspects host OS, processor architecture, physical memory, and available acceleration providers.
+   - `health_check`: Probes Python compatibility, SLM provider connectivity, and tool registry integrity.
+   - `echo`: Parameter passing verification tool.
 
 ---
 
-## 6. Safe Windows OS & Desktop Automation (Milestone 3)
+## Execution Optimizations
 
-The SLM **never** executes arbitrary PowerShell, CMD, or shell strings. Every OS capability is encapsulated within a typed `BaseTool` registered in `ToolRegistry`.
+To deliver responsive user experiences on local hardware, ExoCortex integrates two complementary execution optimizations:
+
+### 1. Deterministic Fast Path (`FastPathRouter`)
+High-frequency canonical requests bypass model deliberation entirely:
+- **Scope**: Canonical zero-argument queries for window enumeration, process listing, system diagnostics, and health checks.
+- **Matching**: Exact normalized dictionary matching (case-folded, whitespace-collapsed, punctuation-stripped). No fuzzy matching, parameter extraction, or mutation bypass.
+- **Latency**: Sub-millisecond dispatch (<1 ms) with **0 LLM calls**.
+
+### 2. Direct Observation Completion
+When a user prompt resolves to a single read-only desktop observation (such as `list_open_windows`, `list_processes`, or `inspect_window_ui_elements`), the observation output is returned directly to the user:
+- **Policy**: Applies only when `planned_steps == 1`, tool is in the safe direct-completion allowlist, and execution succeeded.
+- **Latency Impact**: Saves a full second inference synthesis turn (~90–140s on CPU), cutting task completion time in half.
+
+---
+
+## Project Structure
 
 ```
 exocortex/
-    execution/
-        __init__.py              # Execution engine exports
-        executor.py              # Multi-step cognitive loop engine
-        state.py                 # ExecutionState & ActionHistoryTracker
-        trace.py                 # ExecutionTrace telemetry recorder
-    runtime/
-        __init__.py              # Runtime dispatch exports
-        capabilities.py          # NPU and hardware capability models
-        detector.py              # Hardware, Snapdragon, & provider detection
-        provider.py              # Deterministic provider resolution dispatcher
-    tools/
-        windows/
-            __init__.py          # Windows tool suite exports
-            launch_application.py# Allowlist application launcher
-            open_url.py          # Scheme-validated URL browser opener
-            filesystem.py        # Workspace-sandboxed file tools
-            processes.py         # Read-only process inspector
-            system.py            # Host & hardware diagnostics
+├── agent.py                 # ExoCortexAgent orchestrator & entry point
+├── config.py                # Environment configuration & runtime settings
+├── benchmarking.py          # Local SLM inference benchmark suite
+├── cli.py                   # Command-line interface
+├── hardware.py              # Host system hardware & memory detection
+├── health.py                # Component health diagnostic probes
+├── schema.py                # Pydantic schemas (AgentDecision, StructuredStep)
+├── execution/
+│   ├── executor.py          # Multi-step cognitive loop engine (AgentExecutor)
+│   ├── fast_path.py         # Sub-millisecond deterministic FastPathRouter
+│   ├── state.py             # ExecutionState & loop detection tracker
+│   └── trace.py             # Structured ExecutionTrace telemetry recorder
+├── runtime/
+│   ├── capabilities.py      # Execution provider capability models & RuntimeProfile
+│   ├── detector.py          # ONNX Runtime provider & memory discovery
+│   └── provider.py          # RuntimeDispatcher for auto/dml/cpu resolution
+├── slm/
+│   ├── base.py              # Abstract SLMProvider interface
+│   ├── factory.py           # Provider resolver (local_server, onnx, mock)
+│   ├── local_provider.py    # OpenAI-compatible HTTP provider (Ollama / Qwen3:4B)
+│   ├── local_model_engine.py# Real ONNX neural engine wrapper
+│   ├── onnx_engine.py       # Autoregressive transformer engine with KV-cache
+│   ├── parser.py            # JSON schema validation & repair engine
+│   └── prompts.py           # System prompts, tool schemas & few-shot examples
+└── tools/
+    ├── base.py              # BaseTool, ToolResult, PermissionLevel
+    ├── builtin.py           # SystemInfoTool, HealthCheckTool, EchoTool
+    ├── registry.py          # Central ToolRegistry & dispatch validation
+    ├── web/                 # DuckDuckGo search & web page fetch tools
+    └── windows/             # Win32 desktop windows, UI Automation, filesystem
 ```
 
 ---
 
-## 7. Snapdragon / Hardware Acceleration & Runtime Dispatch (Milestone 5)
-
-ExoCortex is engineered with an intelligent **Hardware-Aware Runtime Dispatch Layer** (`exocortex.runtime`) that deterministically selects the optimal inference backend at runtime.
-
-### Dispatch Rules:
-1. **Snapdragon Native Execution**: If running on Qualcomm Snapdragon silicon (e.g. Snapdragon X Elite / X Plus) AND `QNNExecutionProvider` is installed, ONNX Runtime initializes inference on the **Qualcomm Hexagon NPU**.
-2. **Safe CPU Fallback**: If running on non-ARM64 / Intel hardware, or if QNN provider initialization fails, the engine logs the failure reason and cleanly falls back to `CPUExecutionProvider`.
-3. **No Fake NPU Reporting**: NPU acceleration is strictly reported as `ACTIVE` only when real on-device neural tensor operations are verified on Snapdragon hardware with QNN. On Intel/x64 systems, status clearly reports `NPU: UNAVAILABLE (CPU Fallback Active)`.
-
-### Configuration:
-Set via environment variable:
-```bash
-# Options: auto (default), cpu, qnn, dml
-set EXOCORTEX_EXECUTION_PROVIDER=auto
-```
-
----
-
-## 8. Implementation Status: Current vs. Snapdragon Roadmap
-
-> [!IMPORTANT]
-> **Hardware Status Note**: The development host is currently running on an **Intel x64 CPU** using `CPUExecutionProvider`. Snapdragon NPU / Hexagon acceleration via `QNNExecutionProvider` is architecturally supported, tested with fallback isolation, and ready for deployment on Qualcomm Copilot+ PCs.
-
-| Feature / Subsystem | Current Status (Milestone 5) | Future Target (Snapdragon NPU) |
-| :--- | :--- | :--- |
-| **SLM Inference Engine** | ✅ **Active on CPU** via `LocalSLMProvider` (Real ONNX Qwen2.5-0.5B INT8) | 🚀 **Qualcomm Hexagon NPU** via `QNNExecutionProvider` |
-| **Runtime Dispatch** | ✅ **Active & Tested**: Hardware-aware `RuntimeDispatcher` with automatic fallback | 🚀 Qualcomm AI Hub INT4 compilation & dynamic NPU context |
-| **Agentic Cognitive Loop** | ✅ **Active**: Safe multi-step `AgentExecutor`, loop detection, observation feedback | 🚀 Proactive goal decomposition & background triggers |
-| **Tool Calling Pipeline** | ✅ **Active & Tested**: Strict JSON schema, dynamic tool prompting, validation & repair | 🚀 Expanded Windows UI Automation & Vision Tools |
-| **Windows Desktop Tools** | ✅ **Active**: App launcher, URL opener, workspace filesystem, process inspector | 🚀 Direct accessibility tree inspection & UI automation |
-| **Cloud Dependency** | ❌ **0% (Zero Cloud AI APIs)** | ❌ **0% (100% On-Device)** |
-| **Telemetry & Metrics** | ✅ **Active**: Step latency, tokens/sec, RAM, ExecutionTrace JSON export | 🚀 NPU Power Draw (Watts) & Thermal Efficiency |
-
----
-
-## 9. Milestone Status Tracker
-
-- [x] **Milestone 1 — Foundation**: Modular agent skeleton, configuration manager, hardware discovery, tool sandbox, status probe, Windows CLI.
-- [x] **Milestone 2 — Local SLM Brain & Structured Tool Calling**:
-  - [x] Evaluation and selection of `Qwen2.5-0.5B-Instruct` as primary MVP model.
-  - [x] Real on-device ONNX neural generator with KV caching.
-  - [x] Strict structured response format (`AgentDecision`, `StructuredStep`).
-  - [x] JSON extractor, validator, and malformed-output repair engine.
-  - [x] Dynamic tool-aware prompt generator injecting registered tool schemas.
-  - [x] Local inference benchmarking suite (`exocortex benchmark`).
-- [x] **Milestone 3 — Safe Windows Desktop & OS Automation**:
-  - [x] Safe application launcher (`launch_application`) with strict allowlist.
-  - [x] Validated URL opener (`open_url`) supporting `http`/`https`.
-  - [x] Workspace-sandboxed filesystem tools (`list_directory`, `read_text_file`, `create_directory`).
-  - [x] Read-only Windows process inspector (`list_processes`).
-  - [x] Unified tool registry exposing all 9 tools to the SLM.
-- [x] **Milestone 4 — Safe Agentic Execution Loop**:
-  - [x] Safe multi-step execution loop (`AgentExecutor`) with observation feedback.
-  - [x] Hard limit enforcement (`MAX_STEPS = 8`).
-  - [x] Loop detection (`MAX_IDENTICAL_ACTIONS = 2`).
-  - [x] Context truncation bounding tool observations to 2,000 characters.
-  - [x] Structured `ExecutionTrace` with step breakdown and JSON export.
-- [x] **Milestone 5 — Snapdragon Hardware Acceleration & Runtime Dispatch**:
-  - [x] Created `exocortex.runtime` package (`detector.py`, `provider.py`, `capabilities.py`).
-  - [x] Hardware-aware provider resolution (`RuntimeDispatcher`) supporting `auto`, `cpu`, `qnn`, `dml`.
-  - [x] Safe exception catching and fallback to `CPUExecutionProvider` upon QNN initialization failure.
-  - [x] Accurate NPU status reporting without simulated / fake acceleration.
-  - [x] Extended `exocortex status`, `exocortex hardware`, and `exocortex benchmark` with runtime telemetry.
-  - [x] 88 passing automated unit tests across 12 test modules.
-
----
-
-## 10. Quickstart & CLI Commands
+## Installation & Setup
 
 ### Prerequisites
-- Python 3.11 or 3.12
-- Windows 11 (ARM64 Snapdragon or x64)
+- **Operating System**: Windows 10 or Windows 11 (x86_64 or ARM64)
+- **Python**: Version 3.11, 3.12, or 3.13
+- **Local Model (Recommended)**: [Ollama](https://ollama.com/) with `qwen3:4b`
 
-### Running System Status & Hardware Diagnostics
+### 1. Clone & Install Dependencies
 ```powershell
-# System health, SLM engine, and runtime dispatch status
+git clone https://github.com/aadesh-2006/ExoCortex.git
+cd ExoCortex
+
+# Create and activate a virtual environment
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# Install runtime dependencies
+pip install -r requirements.txt
+
+# Install development & test dependencies
+pip install -r requirements-dev.txt
+```
+
+### 2. Configure Environment
+Copy `.env.example` to `.env` or set environment variables:
+```powershell
+Copy-Item .env.example .env
+```
+
+Key environment configuration variables:
+```ini
+# SLM Provider: local_server (Ollama), onnx, or mock
+EXOCORTEX_SLM_PROVIDER=local_server
+EXOCORTEX_MODEL_NAME=qwen3:4b
+EXOCORTEX_LOCAL_SERVER_URL=http://localhost:11434/v1
+EXOCORTEX_LOCAL_SERVER_TIMEOUT=180.0
+
+# Hardware Acceleration: auto, dml, or cpu
+EXOCORTEX_HARDWARE_TARGET=auto
+
+# Security & Optimization
+EXOCORTEX_REQUIRE_CONFIRMATION_FOR_SENSITIVE=true
+EXOCORTEX_ENABLE_FAST_PATH=true
+EXOCORTEX_DIRECT_OBSERVATION_COMPLETION=true
+```
+
+---
+
+## Usage & CLI Reference
+
+### System Status & Health Probes
+```powershell
+# Inspect overall system health, SLM connectivity, and registered tools
 python -m exocortex.cli status
 
-# Hardware profile and Qualcomm Snapdragon NPU readiness probe
+# Inspect hardware architecture, available execution providers, and memory
 python -m exocortex.cli hardware
 
-# Inspect all registered tools and security permissions
+# List all registered tools and their security permission levels
 python -m exocortex.cli tools
+```
 
-# Run local SLM inference benchmark
+### Running Interactive Desktop Tasks
+```powershell
+# Fast-path canonical request (executes in <1 ms with 0 LLM calls)
+python -m exocortex.cli run --prompt "list open windows"
+
+# Parameterized desktop inspection
+python -m exocortex.cli run --prompt "Check which windows are open and inspect their UI elements"
+
+# Inspect files in the sandboxed workspace
+python -m exocortex.cli run --prompt "List the files in my workspace"
+
+# Run with full structured execution trace
+python -m exocortex.cli run --prompt "What processes are currently running?" --trace
+```
+
+### Local Inference Benchmarking
+```powershell
+# Run the built-in local inference benchmark suite
 python -m exocortex.cli benchmark
 ```
 
-### Running Autonomous Multi-Step Desktop Tasks
+---
+
+## Running the Test Suite
+
+ExoCortex maintains comprehensive automated test coverage spanning unit tests, execution traces, permission gating, and tool dispatch:
+
 ```powershell
-# Run a task with multi-step execution trace
-python -m exocortex.cli run --prompt "Open Notepad" --trace
+# Run the full test suite
+py -m pytest -v
 
-# Run a task and output JSON trace
-python -m exocortex.cli run --prompt "Show me my running processes" --json
+# Run focused fast-path and execution tests
+py -m pytest tests/test_fast_path.py tests/test_direct_completion.py -v
 
-# Inspect files in the safe workspace (~/.exocortex/workspace)
-python -m exocortex.cli run --prompt "List the files in my ExoCortex workspace"
-
-# Create a directory inside workspace
-python -m exocortex.cli run --prompt "Create a folder called research inside my workspace"
+# Run with coverage report
+py -m pytest --cov=exocortex tests/
 ```
 
-### Running the Test Suite
-```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
-```
+---
 
+## License
 
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

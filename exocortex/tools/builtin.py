@@ -40,10 +40,10 @@ class EchoTool(BaseTool):
 
 
 class SystemInfoTool(BaseTool):
-    """Tool to inspect Windows system hardware, CPU/NPU, and memory."""
+    """Tool to inspect Windows system hardware, CPU, and memory."""
 
     name = "system_info"
-    description = "Inspects host system hardware, Snapdragon NPU capabilities, and memory."
+    description = "Inspects host system hardware, processor architecture, and memory."
     permission_level = PermissionLevel.SAFE
     parameters = [
         ToolParameter(
@@ -63,7 +63,6 @@ class SystemInfoTool(BaseTool):
             f"OS: {hw.os_name} {hw.os_release} ({hw.os_version})",
             f"Architecture: {hw.architecture}",
             f"Processor: {hw.processor_name}",
-            f"Snapdragon NPU Detected: {'Yes' if hw.is_snapdragon_detected else 'No'}",
             f"Recommended Accelerator: {hw.recommended_execution_provider}",
             f"Memory: {hw.available_memory_gb:.1f} GB free / {hw.total_memory_gb:.1f} GB total",
         ]

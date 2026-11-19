@@ -60,7 +60,7 @@ class BenchmarkResult:
 BENCHMARK_PROMPTS = [
     "Check system hardware information and memory.",
     "Run diagnostics and inspect system health.",
-    "Echo 'Qualcomm Snapdragon AI Lab Challenge'.",
+    "Echo 'ExoCortex Local Agent Verification'.",
 ]
 
 
@@ -83,8 +83,13 @@ def run_benchmark(
     fallback_reason = model_info.get("fallback_reason")
     load_time = float(model_info.get("load_time_ms", 0.0))
 
-    # Benchmark classification: strictly distinguish CPU vs Snapdragon/QNN measurements
-    benchmark_type = "Snapdragon/QNN benchmark" if (is_npu and exec_provider == "QNNExecutionProvider") else "CPU benchmark"
+    # Benchmark classification based on active execution provider
+    if exec_provider in ("CPUExecutionProvider", "CPU"):
+        benchmark_type = "CPU benchmark"
+    elif "Dml" in exec_provider or "DirectML" in exec_provider:
+        benchmark_type = "DirectML benchmark"
+    else:
+        benchmark_type = f"{exec_provider} benchmark"
 
     run_records: List[Dict[str, Any]] = []
     tot_latencies = []

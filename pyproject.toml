@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "exocortex"
 version = "0.1.0"
-description = "ExoCortex: Local-First JARVIS-like Autonomous Personal Computer Agent for Windows (Qualcomm Snapdragon AI Lab Challenge)"
+description = "ExoCortex: Hardware-Agnostic, Local-First AI Agent for Windows"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -15,8 +15,7 @@ authors = [
 keywords = [
     "autonomous-agent",
     "windows-agent",
-    "snapdragon-npu",
-    "qualcomm-ai-hub",
+    "local-ai",
     "local-slm",
     "onnx-runtime",
     "computer-use"

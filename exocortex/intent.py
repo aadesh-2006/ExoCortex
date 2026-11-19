@@ -63,7 +63,7 @@ class IntentEngine:
                 is_multi_step=False,
             )
 
-        if any(w in q_lower for w in ("hardware", "cpu", "npu", "snapdragon", "ram", "memory", "specs")):
+        if any(w in q_lower for w in ("hardware", "cpu", "ram", "memory", "specs")):
             return IntentAnalysis(
                 raw_query=query,
                 primary_category=IntentCategory.HARDWARE_INSPECTION,

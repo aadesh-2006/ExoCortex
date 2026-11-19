@@ -1,8 +1,7 @@
 """
 Local SLM inference engine for ExoCortex.
 
-Executes real on-device neural SLM inference using ONNX Runtime with CPU fallback
-and Snapdragon Hexagon NPU readiness.
+Executes real on-device neural SLM inference using ONNX Runtime.
 """
 
 from __future__ import annotations
@@ -80,7 +79,7 @@ class LocalSLMProvider(SLMProvider):
     
     Primary MVP Model: Qwen2.5-0.5B-Instruct ONNX.
     Execution: Real on-device neural tensor forward passes (Zero cloud APIs).
-    Hardware Target: CPU fallback on current host / Snapdragon Hexagon NPU via QNN on Snapdragon Copilot+ PCs.
+    Hardware Target: CPU or available hardware accelerator.
     """
 
     def __init__(
@@ -143,7 +142,6 @@ class LocalSLMProvider(SLMProvider):
         runtime_prof = RuntimeDispatcher.get_runtime_profile(
             requested_target=self.hardware_target,
             active_provider=self.active_provider,
-            is_npu_active=self.is_npu_active,
             fallback_occurred=self.generator.fallback_occurred if self.generator else False,
             fallback_reason=self.generator.fallback_reason if self.generator else None,
         )

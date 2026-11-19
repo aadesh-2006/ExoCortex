@@ -95,7 +95,7 @@ class AgentPlanner:
             steps.append(
                 PlanStep(
                     step_id=1,
-                    description="Inspect host system hardware and Qualcomm Snapdragon NPU capabilities.",
+                    description="Inspect host system hardware and memory specifications.",
                     tool_name="system_info",
                     arguments={"detail_level": "full"},
                 )

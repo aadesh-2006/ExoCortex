@@ -1,7 +1,7 @@
 """
 ONNX Runtime neural inference engine for Qwen2.5-0.5B-Instruct.
 
-Performs real autoregressive transformer token generation with KV caching on CPU / Snapdragon NPU.
+Performs real autoregressive transformer token generation with KV caching on CPU / hardware accelerators.
 """
 
 from __future__ import annotations
@@ -125,14 +125,14 @@ class ONNXNeuralGenerator:
             if not self.fallback_reason:
                 self.fallback_reason = f"{self.selected_provider} was not active; ONNX Runtime selected CPUExecutionProvider."
 
-        self.is_npu_active = (self.active_provider == "QNNExecutionProvider")
+        self.is_accelerated = (self.active_provider != "CPUExecutionProvider")
+        self.is_npu_active = False
         self.load_time_ms = (time.perf_counter() - start_time) * 1000
         self.is_loaded = True
         logger.info(
-            "Loaded Qwen2.5-0.5B ONNX session in %.1f ms with active provider: %s (NPU active: %s)",
+            "Loaded Qwen2.5-0.5B ONNX session in %.1f ms with active provider: %s",
             self.load_time_ms,
             self.active_provider,
-            self.is_npu_active,
         )
 
     def reset_session(self) -> None:
