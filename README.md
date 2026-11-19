@@ -4,7 +4,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Windows%2010-blue.svg)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/Tests-246%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-259%20Passed-brightgreen.svg)]()
 
 ExoCortex is a hardware-agnostic, local-first AI agent for Windows that interprets natural-language requests, reasons through tasks, and executes them using permission-controlled desktop tools.
 

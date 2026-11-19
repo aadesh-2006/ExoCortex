@@ -29,6 +29,7 @@ class DummyMockTool(BaseTool):
         permission: PermissionLevel = PermissionLevel.SAFE,
         fail: bool = False,
         output_text: str = "Dummy Output",
+        data: Optional[Dict[str, Any]] = None,
     ):
         self.name = name
         self.description = f"Dummy {name}"
@@ -36,6 +37,7 @@ class DummyMockTool(BaseTool):
         self.parameters = []
         self.fail = fail
         self.output_text = output_text
+        self.data = data
         self.call_count = 0
 
     def run(self, **kwargs) -> ToolResult:
@@ -49,6 +51,7 @@ class DummyMockTool(BaseTool):
         return ToolResult(
             success=True,
             output=self.output_text,
+            data=self.data,
         )
 
 
@@ -224,19 +227,29 @@ class TestFastPathRouter(unittest.TestCase):
                 self.assertIsNone(self.router.try_execute(q))
 
     def test_parameterized_requests_fall_through(self):
-        parameterized = [
-            "Is Windows Terminal open?",
+        # Unsupported parameterized requests that must fall through to SLM
+        unsupported = [
             "Inspect the UI elements in the Windows Terminal window.",
             "Inspect window matching 'Visual Studio Code'",
             "Find process with pid 1234",
-            "Is notepad running?",
-            "Check if Chrome is open",
             "system info full detail",
+            "Is some random application running?",
+            "Inspect process with high CPU",
         ]
-        for q in parameterized:
+        for q in unsupported:
             with self.subTest(query=q):
                 self.assertIsNone(self.router.match(q))
                 self.assertIsNone(self.router.try_execute(q))
+
+        # Application-state queries do not match canonical zero-arg router.match()
+        app_state_queries = [
+            "Is Windows Terminal open?",
+            "Is notepad running?",
+            "Check if Chrome is open",
+        ]
+        for q in app_state_queries:
+            with self.subTest(query=q):
+                self.assertIsNone(self.router.match(q))
 
     def test_successful_execution_trace_structure(self):
         cases = [
@@ -389,5 +402,369 @@ class TestFastPathRouter(unittest.TestCase):
         self.assertEqual(trace.slm_info.get("llm_calls"), 0)
 
 
+class TestApplicationStateRouting(unittest.TestCase):
+    """
+    Dedicated test suite for M8 Task 8.8.2: Parameterized Application-State Routing.
+    
+    Verifies:
+    - Supported request patterns
+    - Approved application aliases
+    - Normalization (case, quotes, whitespace, punctuation)
+    - Distinguishing window states and process states
+    - Negative tests (mutating verbs, compound queries, ambiguous aliases, unknown applications)
+    - Permission checks and zero LLM calls
+    """
+
+    def setUp(self):
+        self.registry = ToolRegistry()
+        self.windows_tool = DummyMockTool(
+            "list_open_windows",
+            output_text="No visible application windows found on the desktop.",
+            data={"returned_count": 0, "windows": []},
+        )
+        self.process_tool = DummyMockTool(
+            "list_processes",
+            output_text="Top 0 Running Processes",
+            data={"total_processes_scanned": 0, "returned_count": 0, "processes": []},
+        )
+        self.registry.register(self.windows_tool)
+        self.registry.register(self.process_tool)
+        self.router = FastPathRouter(tool_registry=self.registry, enabled=True)
+
+    def test_every_supported_phrase_pattern(self):
+        patterns = [
+            ("is notepad running?", "running"),
+            ("is notepad open?", "open"),
+            ("is notepad active?", "active"),
+            ("check if notepad is running", "running"),
+            ("check if notepad is open", "open"),
+            ("check if notepad is active", "active"),
+            ("do i have notepad open?", "open"),
+            ("do i have notepad running?", "running"),
+            ("can you check if notepad is running", "running"),
+            ("can you check if notepad is open", "open"),
+            ("please check if notepad is running", "running"),
+            ("please check if notepad is open", "open"),
+            ("check whether notepad is running", "running"),
+            ("check whether notepad is open", "open"),
+            ("is notepad currently running", "running"),
+            ("is notepad currently open", "open"),
+            ("is notepad running right now", "running"),
+        ]
+        for query, expected_target_state in patterns:
+            with self.subTest(query=query):
+                res = self.router.match_application_state(query)
+                self.assertIsNotNone(res, msg=f"Failed to match pattern: {query}")
+                app_meta, state = res
+                self.assertEqual(app_meta.display_name, "Notepad")
+                self.assertEqual(state, expected_target_state)
+
+    def test_every_approved_application_alias(self):
+        approved_cases = [
+            ("is notepad open?", "Notepad"),
+            ("is windows notepad open?", "Notepad"),
+            ("check if chrome is running", "Google Chrome"),
+            ("check if google chrome is running", "Google Chrome"),
+            ("is firefox open?", "Mozilla Firefox"),
+            ("do i have mozilla firefox open?", "Mozilla Firefox"),
+            ("is spotify running?", "Spotify"),
+            ("is vscode open?", "Visual Studio Code"),
+            ("is vs code open?", "Visual Studio Code"),
+            ("is visual studio code active?", "Visual Studio Code"),
+            ("is windows terminal running?", "Windows Terminal"),
+        ]
+        for query, expected_display in approved_cases:
+            with self.subTest(query=query):
+                res = self.router.match_application_state(query)
+                self.assertIsNotNone(res, msg=f"Failed to match alias: {query}")
+                app_meta, _ = res
+                self.assertEqual(app_meta.display_name, expected_display)
+
+    def test_case_and_whitespace_normalization(self):
+        cases = [
+            ("  Is   NOTEPAD   Open?  ", "Notepad", "open"),
+            ("is \"Google Chrome\" RUNNING???", "Google Chrome", "running"),
+            ("  CHECK IF   'vs code'   is   Active ", "Visual Studio Code", "active"),
+            ("do I have \"Spotify\" open?", "Spotify", "open"),
+            ("is 'firefox' active?", "Mozilla Firefox", "active"),
+            ("  `check whether Windows Terminal is running.` ", "Windows Terminal", "running"),
+        ]
+        for raw, expected_display, expected_state in cases:
+            with self.subTest(raw=raw):
+                res = self.router.match_application_state(raw)
+                self.assertIsNotNone(res, msg=f"Failed normalization for: {raw}")
+                app_meta, state = res
+                self.assertEqual(app_meta.display_name, expected_display)
+                self.assertEqual(state, expected_state)
+
+    def test_visible_window_detection_non_active_and_active(self):
+        # 1. Non-active visible window
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [
+                {"title": "notes.txt - Notepad", "process_name": "notepad.exe", "is_active": False}
+            ],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. \"notes.txt - Notepad\" (notepad.exe)"
+        self.process_tool.data = {
+            "returned_count": 1,
+            "processes": [{"name": "notepad.exe", "pid": 1234, "memory_mb": 25.0}],
+        }
+        self.process_tool.output_text = "Top 1 Running Processes:\n  1234 notepad.exe 25.0 MB"
+
+        # Check 'open'
+        trace_open = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(trace_open.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_open.final_response,
+            'Yes, Notepad is open with a visible window: "notes.txt - Notepad".',
+        )
+
+        # Check 'running'
+        trace_running = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace_running)
+        self.assertEqual(trace_running.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_running.final_response,
+            'Yes, Notepad is running with a visible window: "notes.txt - Notepad".',
+        )
+
+        # Check 'active' (when not active foreground window)
+        trace_active = self.router.try_execute("is notepad active?")
+        self.assertIsNotNone(trace_active)
+        self.assertEqual(trace_active.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_active.final_response,
+            'No, Notepad is open with a visible window ("notes.txt - Notepad"), but it is not the active foreground window.',
+        )
+
+        # 2. Active visible window
+        self.windows_tool.data["windows"][0]["is_active"] = True
+        trace_active2 = self.router.try_execute("is notepad active?")
+        self.assertIsNotNone(trace_active2)
+        self.assertEqual(trace_active2.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_active2.final_response,
+            'Yes, Notepad is currently the active foreground window: "notes.txt - Notepad".',
+        )
+
+        trace_open_act = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_open_act)
+        self.assertEqual(
+            trace_open_act.final_response,
+            'Yes, Notepad is open with an active visible window: "notes.txt - Notepad".',
+        )
+
+    def test_process_only_background_detection_and_semantic_distinction(self):
+        """
+        Verify semantic rule:
+        For an 'is <app> open?' question, a visible window is the strongest evidence of being open.
+        If Chrome has background processes but no visible window, do not claim that a Chrome window is open.
+        Report that Chrome is running in the background but no visible Chrome window was found.
+        """
+        # No visible window
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+        self.windows_tool.output_text = "No visible application windows found on the desktop."
+
+        # Background process exists
+        self.process_tool.data = {
+            "returned_count": 1,
+            "processes": [{"name": "chrome.exe", "pid": 4567, "memory_mb": 420.0}],
+        }
+        self.process_tool.output_text = "Top 1 Running Processes:\n  4567 chrome.exe 420.0 MB"
+
+        # Check 'open' -> reports running in background, no visible window found
+        trace_open = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(trace_open.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_open.final_response,
+            "No visible Google Chrome window was found, but Google Chrome is currently running in the background.",
+        )
+
+        # Check 'running' -> reports running in background
+        trace_running = self.router.try_execute("is chrome running?")
+        self.assertIsNotNone(trace_running)
+        self.assertEqual(trace_running.status, ExecutionStatus.COMPLETED)
+        self.assertIn("Yes, Google Chrome is running in the background (PID: 4567)", trace_running.final_response)
+
+        # Check 'active' -> reports running in background, not active
+        trace_active = self.router.try_execute("is chrome active?")
+        self.assertIsNotNone(trace_active)
+        self.assertEqual(trace_active.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_active.final_response,
+            "No, Google Chrome is running in the background, but has no visible window and is not active.",
+        )
+
+    def test_not_running_detection(self):
+        # Neither visible window nor running process
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+        self.windows_tool.output_text = "No visible application windows found on the desktop."
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        self.process_tool.output_text = "Top 0 Running Processes."
+
+        trace_open = self.router.try_execute("is spotify open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(trace_open.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_open.final_response,
+            "No, Spotify is not open (no matching visible window or running process was found).",
+        )
+
+        trace_running = self.router.try_execute("is spotify running?")
+        self.assertIsNotNone(trace_running)
+        self.assertEqual(trace_running.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_running.final_response,
+            "No, Spotify is not running (no matching process or window was found).",
+        )
+
+        trace_active = self.router.try_execute("is spotify active?")
+        self.assertIsNotNone(trace_active)
+        self.assertEqual(trace_active.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_active.final_response,
+            "No, Spotify is not active and is not running.",
+        )
+
+    def test_tool_execution_failures_do_not_report_success(self):
+        # 1. list_open_windows fails
+        failing_win_tool = DummyMockTool("list_open_windows", fail=True)
+        reg1 = ToolRegistry()
+        reg1.register(failing_win_tool)
+        reg1.register(self.process_tool)
+        router1 = FastPathRouter(tool_registry=reg1, enabled=True)
+
+        trace1 = router1.try_execute("is notepad open?")
+        self.assertIsNotNone(trace1)
+        self.assertEqual(trace1.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace1.final_response)
+        self.assertIn("simulated failure", trace1.error_message)
+
+        # 2. list_processes fails
+        failing_proc_tool = DummyMockTool("list_processes", fail=True)
+        reg2 = ToolRegistry()
+        reg2.register(self.windows_tool)
+        reg2.register(failing_proc_tool)
+        router2 = FastPathRouter(tool_registry=reg2, enabled=True)
+
+        trace2 = router2.try_execute("is notepad running?")
+        self.assertIsNotNone(trace2)
+        self.assertEqual(trace2.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace2.final_response)
+        self.assertIn("simulated failure", trace2.error_message)
+
+    def test_empty_tool_output_does_not_report_success(self):
+        # Empty windows output
+        empty_win_tool = DummyMockTool("list_open_windows", output_text="   \n  ")
+        reg = ToolRegistry()
+        reg.register(empty_win_tool)
+        reg.register(self.process_tool)
+        router = FastPathRouter(tool_registry=reg, enabled=True)
+
+        trace = router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("empty output", trace.error_message)
+
+    def test_unknown_application_names_fall_through(self):
+        unknown_queries = [
+            "Is some random application running?",
+            "Is slack open?",
+            "check if vlc is running",
+            "do i have excel open?",
+            "is python running?",
+        ]
+        for q in unknown_queries:
+            with self.subTest(query=q):
+                self.assertIsNone(self.router.match_application_state(q))
+                self.assertIsNone(self.router.try_execute(q))
+
+    def test_ambiguous_application_aliases_fall_through(self):
+        ambiguous_queries = [
+            "is terminal open?",
+            "is browser running?",
+            "check if web browser is open",
+            "is editor active?",
+            "is code running?",
+            "is app open?",
+            "is application running?",
+        ]
+        for q in ambiguous_queries:
+            with self.subTest(query=q):
+                self.assertIsNone(self.router.match_application_state(q))
+                self.assertIsNone(self.router.try_execute(q))
+
+    def test_compound_and_mutating_requests_rejected(self):
+        rejected_queries = [
+            "Is Chrome open and close it",
+            "Kill Chrome",
+            "Open Notepad",
+            "Is notepad running and terminate it",
+            "Launch Spotify",
+            "Is Chrome open; close it",
+            "Start Visual Studio Code",
+            "is notepad open then close it",
+        ]
+        for q in rejected_queries:
+            with self.subTest(query=q):
+                self.assertIsNone(self.router.match_application_state(q))
+                self.assertIsNone(self.router.try_execute(q))
+
+    def test_permission_and_confirmation_boundaries(self):
+        cb = MagicMock(return_value=True)
+
+        # 1. list_open_windows requires confirmation
+        reg1 = ToolRegistry(confirmation_callback=cb)
+        confirm_win_tool = DummyMockTool("list_open_windows", permission=PermissionLevel.CONFIRMATION_REQUIRED)
+        reg1.register(confirm_win_tool)
+        reg1.register(self.process_tool)
+        router1 = FastPathRouter(tool_registry=reg1, enabled=True)
+        self.assertIsNone(router1.try_execute("is notepad open?"))
+        cb.assert_not_called()
+        self.assertEqual(confirm_win_tool.call_count, 0)
+
+        # 2. list_processes is RESTRICTED
+        reg2 = ToolRegistry()
+        reg2.register(self.windows_tool)
+        restricted_proc_tool = DummyMockTool("list_processes", permission=PermissionLevel.RESTRICTED)
+        reg2.register(restricted_proc_tool)
+        router2 = FastPathRouter(tool_registry=reg2, enabled=True)
+        self.assertIsNone(router2.try_execute("is notepad running?"))
+        self.assertEqual(restricted_proc_tool.call_count, 0)
+
+    def test_agent_integration_application_state_zero_llm_calls(self):
+        mock_slm = MagicMock(wraps=MockSLMProvider())
+        agent = ExoCortexAgent(
+            slm_provider=mock_slm,
+            tool_registry=self.registry,
+            enable_fast_path=True,
+        )
+
+        # Setup mock window
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "ExoCortex - Visual Studio Code", "process_name": "code.exe", "is_active": True}],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. [ACTIVE] \"ExoCortex - Visual Studio Code\" (code.exe)"
+
+        res = agent.run("Is VS Code open?")
+        self.assertTrue(res.success)
+        self.assertIn("Yes, Visual Studio Code is open with an active visible window", res.response_text)
+        self.assertEqual(res.slm_info.get("provider"), "FastPathRouter")
+        self.assertEqual(res.slm_info.get("llm_calls"), 0)
+        mock_slm.generate.assert_not_called()
+
+        # Non-fast-path general conversational query falls through to SLM
+        res2 = agent.run("What is the capital of France?")
+        self.assertTrue(res2.success)
+        self.assertEqual(res2.slm_info.get("provider"), "MockSLMProvider")
+        self.assertEqual(mock_slm.generate.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
