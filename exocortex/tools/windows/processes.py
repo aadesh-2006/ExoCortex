@@ -60,23 +60,49 @@ class ListProcessesTool(BaseTool):
         limit_val = kwargs.get("limit", 20)
         sort_by = str(kwargs.get("sort_by", "memory")).lower()
 
+        total_pids_scanned = 0
+        access_denied_count = 0
+        vanished_count = 0
         process_list: List[Dict[str, Any]] = []
 
+        _AD_SENTINEL = object()
         try:
-            for p in psutil.process_iter(["pid", "name", "memory_info"]):
+            for p in psutil.process_iter(["pid", "name", "memory_info"], ad_value=_AD_SENTINEL):
+                total_pids_scanned += 1
                 try:
                     info = p.info
+                    if not isinstance(info, dict):
+                        continue
+
+                    raw_name = info.get("name")
+                    raw_mem = info.get("memory_info")
                     pid = info.get("pid")
-                    name = info.get("name") or "Unknown"
-                    mem_info = info.get("memory_info")
-                    mem_mb = round(mem_info.rss / (1024 * 1024), 1) if mem_info else 0.0
+                    if pid is None:
+                        pid = getattr(p, "pid", None)
+
+                    if raw_name is _AD_SENTINEL:
+                        access_denied_count += 1
+                        continue
+
+                    name = raw_name or "Unknown"
+
+                    if raw_mem is _AD_SENTINEL:
+                        mem_mb = 0.0
+                    elif raw_mem:
+                        mem_mb = round(raw_mem.rss / (1024 * 1024), 1)
+                    else:
+                        mem_mb = 0.0
 
                     process_list.append({
                         "pid": pid,
                         "name": name,
                         "memory_mb": mem_mb,
                     })
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                except psutil.AccessDenied:
+                    access_denied_count += 1
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    vanished_count += 1
+                except OSError:
                     continue
 
             # Sort
@@ -109,6 +135,10 @@ class ListProcessesTool(BaseTool):
                 output=output_text,
                 data={
                     "total_processes_scanned": len(process_list),
+                    "total_pids_scanned": total_pids_scanned,
+                    "access_denied_count": access_denied_count,
+                    "vanished_count": vanished_count,
+                    "scan_complete": bool(access_denied_count == 0),
                     "returned_count": len(top_processes),
                     "sort_by": sort_by,
                     "processes": top_processes,

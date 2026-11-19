@@ -226,52 +226,95 @@ def normalize_fast_path_query(query: str) -> str:
     return q
 
 
+def _validate_windows_data(data: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Defensively validate structured output from list_open_windows.
+    Returns (is_valid, failure_reason).
+    """
+    if not isinstance(data, dict):
+        return False, "data is not a dictionary"
+    raw_windows = data.get("windows")
+    if not isinstance(raw_windows, list):
+        return False, "'windows' field is missing or not a list"
+    for idx, w in enumerate(raw_windows):
+        if not isinstance(w, dict):
+            return False, f"window entry at index {idx} is not a dictionary"
+        has_title = isinstance(w.get("title"), str)
+        has_proc = isinstance(w.get("process_name"), str)
+        if not has_title and not has_proc:
+            return False, f"window entry at index {idx} has neither valid title nor process_name"
+    return True, None
+
+
+def _validate_processes_data(data: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Defensively validate structured output from list_processes.
+    Returns (is_valid, failure_reason).
+    """
+    if not isinstance(data, dict):
+        return False, "data is not a dictionary"
+    raw_procs = data.get("processes")
+    if not isinstance(raw_procs, list):
+        return False, "'processes' field is missing or not a list"
+    for idx, p in enumerate(raw_procs):
+        if not isinstance(p, dict):
+            return False, f"process entry at index {idx} is not a dictionary"
+        if not isinstance(p.get("name"), str):
+            return False, f"process entry at index {idx} is missing a valid 'name' string"
+    return True, None
+
+
 def _filter_matching_windows(
     tool_res_windows: Any,
     app_meta: ApplicationMetadata,
 ) -> List[Dict[str, Any]]:
     """
     Identity-first matching for window records:
-    1. If process_name is known (not 'unknown' and non-empty), require exact case-insensitive
-       executable name match. A window title NEVER overrides a known mismatched process name.
-    2. If process identity is genuinely unavailable ('unknown', empty, or missing),
-       conservative, application-specific title matching is used.
+    1. If process_name is known (a valid non-empty string other than 'unknown'), require exact
+       case-insensitive executable name match. A window title NEVER overrides a known mismatched process name.
+    2. If process identity is explicitly 'unknown' (the literal string 'unknown' as populated by OS inspection
+       failure in desktop_windows.py), conservative, application-specific title matching is used:
+       title must end with or exactly match an approved pattern.
+    3. Missing, None, empty, or unexpected process identity values are treated conservatively and are NOT
+       converted into an unknown-identity fallback.
     """
-    windows: List[Dict[str, Any]] = []
-    if isinstance(tool_res_windows.data, dict):
-        windows = tool_res_windows.data.get("windows", [])
+    if not isinstance(tool_res_windows.data, dict):
+        return []
+    raw_windows = tool_res_windows.data.get("windows")
+    if not isinstance(raw_windows, list):
+        return []
 
     matching_windows: List[Dict[str, Any]] = []
-    for w in windows:
-        proc_name = str(w.get("process_name", "")).strip().lower()
-        title = str(w.get("title", "")).strip().lower()
-        is_proc_known = bool(proc_name and proc_name != "unknown")
-        exe_matches = any(exe.lower() == proc_name for exe in app_meta.executable_names)
+    for w in raw_windows:
+        if not isinstance(w, dict):
+            continue
 
-        if is_proc_known:
+        raw_proc = w.get("process_name")
+        raw_title = w.get("title")
+
+        title = raw_title.strip().lower() if isinstance(raw_title, str) else ""
+
+        is_explicit_unknown = isinstance(raw_proc, str) and raw_proc.strip().lower() == "unknown"
+        is_known_proc = isinstance(raw_proc, str) and raw_proc.strip() != "" and not is_explicit_unknown
+
+        if is_known_proc:
             # Process identity is known: MUST match an approved executable name
+            proc_name = raw_proc.strip().lower()
+            exe_matches = any(exe.lower() == proc_name for exe in app_meta.executable_names)
             if exe_matches:
                 matching_windows.append(w)
-        else:
-            # Conservative fallback only if process identity was genuinely unavailable
+        elif is_explicit_unknown:
+            # Conservative title fallback ONLY when process identity is explicitly 'unknown'
+            # Window title must end with or exactly match an approved pattern (interior substrings rejected)
             title_matches = any(
-                title.endswith(pat.lower()) or title == pat.lower() or f" {pat.lower()} " in f" {title} "
+                title.endswith(pat.lower()) or title == pat.lower()
                 for pat in app_meta.window_title_patterns
             )
             if title_matches:
                 matching_windows.append(w)
-
-    # Fallback for simple mock tools that only populate output string
-    if not matching_windows and not windows and tool_res_windows.output:
-        out_lower = tool_res_windows.output.lower()
-        if any(exe.lower() in out_lower for exe in app_meta.executable_names) or any(
-            pat.lower() in out_lower for pat in app_meta.window_title_patterns
-        ):
-            matching_windows.append({
-                "title": app_meta.display_name,
-                "process_name": app_meta.executable_names[0],
-                "is_active": "[active]" in out_lower,
-            })
+        else:
+            # None, missing, empty, or malformed process identity is NOT eligible for fallback
+            continue
 
     return matching_windows
 
@@ -281,25 +324,22 @@ def _filter_matching_processes(
     app_meta: ApplicationMetadata,
 ) -> List[Dict[str, Any]]:
     """Filter processes by exact case-insensitive executable name match."""
-    procs: List[Dict[str, Any]] = []
-    if isinstance(tool_res_procs.data, dict):
-        procs = tool_res_procs.data.get("processes", [])
+    if not isinstance(tool_res_procs.data, dict):
+        return []
+    raw_procs = tool_res_procs.data.get("processes")
+    if not isinstance(raw_procs, list):
+        return []
 
     matching_processes: List[Dict[str, Any]] = []
-    for p in procs:
-        p_name = str(p.get("name", "")).strip().lower()
+    for p in raw_procs:
+        if not isinstance(p, dict):
+            continue
+        raw_name = p.get("name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        p_name = raw_name.strip().lower()
         if any(exe.lower() == p_name for exe in app_meta.executable_names):
             matching_processes.append(p)
-
-    # Fallback for simple mock tools that only populate output string
-    if not matching_processes and not procs and tool_res_procs.output:
-        out_lower = tool_res_procs.output.lower()
-        if any(exe.lower() in out_lower for exe in app_meta.executable_names):
-            matching_processes.append({
-                "name": app_meta.executable_names[0],
-                "pid": None,
-                "memory_mb": None,
-            })
 
     return matching_processes
 
@@ -555,11 +595,18 @@ class FastPathRouter:
                     user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
                 )
 
+            is_valid_win, win_err = _validate_windows_data(tool_res_windows.data)
+            if not is_valid_win:
+                err = f"Tool 'list_open_windows' returned malformed structured data: {win_err}"
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
+                )
+
             matching_windows = _filter_matching_windows(tool_res_windows, app_meta)
             has_visible_window = len(matching_windows) > 0
             is_active_window = any(bool(w.get("is_active")) for w in matching_windows)
 
-            titles = [w.get("title", "").strip() for w in matching_windows if w.get("title")]
+            titles = [w.get("title", "").strip() for w in matching_windows if isinstance(w.get("title"), str) and w.get("title").strip()]
             first_title = titles[0] if titles else app_meta.display_name
 
             # Short-circuit policy for 'active'
@@ -608,19 +655,43 @@ class FastPathRouter:
                     prior_tool="list_open_windows", prior_result=tool_res_windows, prior_tool_obj=tool_windows, prior_dur=dur_windows
                 )
 
+            is_valid_proc, proc_err = _validate_processes_data(tool_res_procs.data)
+            if not is_valid_proc:
+                err = f"Tool 'list_processes' returned malformed structured data: {proc_err}"
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs,
+                    prior_tool="list_open_windows", prior_result=tool_res_windows, prior_tool_obj=tool_windows, prior_dur=dur_windows
+                )
+
             matching_processes = _filter_matching_processes(tool_res_procs, app_meta)
             has_running_process = len(matching_processes) > 0
+
+            proc_data = tool_res_procs.data if isinstance(tool_res_procs.data, dict) else {}
+            scan_complete = bool(proc_data.get("scan_complete", True))
+            ad_count = int(proc_data.get("access_denied_count", 0))
 
             if target_state == "active":
                 if has_running_process:
                     final_response = f"No, {app_meta.display_name} is running in the background, but has no visible window and is not active."
-                else:
+                elif scan_complete:
                     final_response = f"No, {app_meta.display_name} is not active and is not running."
+                else:
+                    final_response = (
+                        f"No, {app_meta.display_name} is not active (no visible window found). "
+                        f"Background running state could not be verified because process scan was partial "
+                        f"({ad_count} inaccessible processes)."
+                    )
             else:  # target_state == "open"
                 if has_running_process:
                     final_response = f"No visible {app_meta.display_name} window was found, but {app_meta.display_name} is currently running in the background."
-                else:
+                elif scan_complete:
                     final_response = f"No, {app_meta.display_name} is not open (no matching visible window or running process was found)."
+                else:
+                    final_response = (
+                        f"No, {app_meta.display_name} is not open (no matching visible window was found). "
+                        f"Background running state could not be verified because process scan was partial "
+                        f"({ad_count} inaccessible processes)."
+                    )
 
             return self._build_two_step_trace(
                 user_query,
@@ -650,12 +721,20 @@ class FastPathRouter:
                     user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs
                 )
 
+            is_valid_proc, proc_err = _validate_processes_data(tool_res_procs.data)
+            if not is_valid_proc:
+                err = f"Tool 'list_processes' returned malformed structured data: {proc_err}"
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs
+                )
+
             matching_processes = _filter_matching_processes(tool_res_procs, app_meta)
 
             # Short-circuit policy for 'running': matching process is sufficient
             if len(matching_processes) > 0:
                 proc_info = matching_processes[0]
-                pid_str = f" (PID: {proc_info['pid']})" if proc_info and proc_info.get("pid") is not None else ""
+                pid_val = proc_info.get("pid") if isinstance(proc_info, dict) else None
+                pid_str = f" (PID: {pid_val})" if pid_val is not None else ""
                 final_response = f"Yes, {app_meta.display_name} is running{pid_str}."
                 return self._build_single_step_trace(
                     user_query, "list_processes", tool_procs, tool_res_procs, dur_procs,
@@ -681,13 +760,32 @@ class FastPathRouter:
                     prior_tool="list_processes", prior_result=tool_res_procs, prior_tool_obj=tool_procs, prior_dur=dur_procs
                 )
 
+            is_valid_win, win_err = _validate_windows_data(tool_res_windows.data)
+            if not is_valid_win:
+                err = f"Tool 'list_open_windows' returned malformed structured data: {win_err}"
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows,
+                    prior_tool="list_processes", prior_result=tool_res_procs, prior_tool_obj=tool_procs, prior_dur=dur_procs
+                )
+
             matching_windows = _filter_matching_windows(tool_res_windows, app_meta)
             if len(matching_windows) > 0:
-                titles = [w.get("title", "").strip() for w in matching_windows if w.get("title")]
+                titles = [w.get("title", "").strip() for w in matching_windows if isinstance(w.get("title"), str) and w.get("title").strip()]
                 first_title = titles[0] if titles else app_meta.display_name
                 final_response = f'Yes, {app_meta.display_name} is running with a visible window: "{first_title}".'
             else:
-                final_response = f"No, {app_meta.display_name} is not running (no matching process or window was found)."
+                proc_data = tool_res_procs.data if isinstance(tool_res_procs.data, dict) else {}
+                scan_complete = bool(proc_data.get("scan_complete", True))
+                ad_count = int(proc_data.get("access_denied_count", 0))
+
+                if scan_complete:
+                    final_response = f"No, {app_meta.display_name} is not running (no matching process or window was found)."
+                else:
+                    final_response = (
+                        f"Could not confirm whether {app_meta.display_name} is running: "
+                        f"process scan was partial ({ad_count} inaccessible elevated/system processes) "
+                        f"and no visible window was found."
+                    )
 
             return self._build_two_step_trace(
                 user_query,

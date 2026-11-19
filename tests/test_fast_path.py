@@ -996,6 +996,472 @@ class TestApplicationStateRouting(unittest.TestCase):
         self.assertTrue(valid, msg=err)
 
 
+class TestDefensiveParsingAndIdentityHardening(unittest.TestCase):
+    """
+    Tests for defensive parsing and identity policy hardening in fast_path.py:
+    - Malformed structured data (data=None, data not dict, windows/processes not list)
+    - Malformed list items ([None], [{}])
+    - Identity handling: process_name=None, missing process_name, explicit 'unknown'
+    - Known process identity precedence over window title
+    - Error trace generation with 0 LLM calls for malformed inputs
+    """
+
+    def setUp(self):
+        self.registry = ToolRegistry()
+        self.windows_tool = DummyMockTool(
+            "list_open_windows",
+            output_text="Desktop Windows",
+            data={"returned_count": 0, "windows": []},
+        )
+        self.process_tool = DummyMockTool(
+            "list_processes",
+            output_text="Running Processes",
+            data={"total_processes_scanned": 0, "returned_count": 0, "processes": []},
+        )
+        self.registry.register(self.windows_tool)
+        self.registry.register(self.process_tool)
+        self.router = FastPathRouter(tool_registry=self.registry, enabled=True)
+
+    def test_malformed_windows_data_none(self):
+        self.windows_tool.data = {"windows": None}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_windows_data_unexpected_type(self):
+        self.windows_tool.data = {"windows": "unexpected_string"}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_windows_data_item_none(self):
+        self.windows_tool.data = {"windows": [None]}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_windows_data_item_empty_dict(self):
+        self.windows_tool.data = {"windows": [{}]}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_windows_data_not_dict(self):
+        self.windows_tool.data = "not_a_dictionary"
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_processes_data_none(self):
+        self.process_tool.data = {"processes": None}
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_processes_data_item_none(self):
+        self.process_tool.data = {"processes": [None]}
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_processes_data_item_empty_dict(self):
+        self.process_tool.data = {"processes": [{}]}
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_malformed_processes_data_not_dict(self):
+        self.process_tool.data = 42
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.ERROR)
+        self.assertIsNone(trace.final_response)
+        self.assertIn("malformed structured data", trace.error_message)
+
+    def test_process_name_none_does_not_convert_to_string_none(self):
+        # A window record with process_name=None and title matching Notepad.
+        # Under hardened identity policy, process_name=None is NOT explicit "unknown",
+        # so it must NOT trigger title fallback and must NOT match Notepad.
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Untitled - Notepad", "process_name": None, "is_active": True}],
+        }
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        # It must not be reported as open because process_name=None is not eligible for title fallback
+        self.assertEqual(
+            trace.final_response,
+            "No, Notepad is not open (no matching visible window or running process was found).",
+        )
+
+    def test_missing_process_name_does_not_fallback(self):
+        # Missing process_name field in window record
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Untitled - Notepad", "is_active": True}],
+        }
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace.final_response,
+            "No, Notepad is not open (no matching visible window or running process was found).",
+        )
+
+    def test_explicit_unknown_process_name_allows_conservative_fallback(self):
+        # Explicit process_name="unknown" IS eligible for conservative title fallback
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Untitled - Notepad", "process_name": "unknown", "is_active": True}],
+        }
+        trace = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace.final_response,
+            'Yes, Notepad is open with an active visible window: "Untitled - Notepad".',
+        )
+
+    def test_known_process_mismatch_never_overridden_by_title(self):
+        # Chrome window with title "Untitled - Notepad"
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Untitled - Notepad", "process_name": "chrome.exe", "is_active": True}],
+        }
+        self.process_tool.data = {
+            "returned_count": 1,
+            "processes": [{"name": "chrome.exe", "pid": 5000, "memory_mb": 100.0}],
+        }
+        # Check if Notepad is open -> must NOT match Notepad
+        trace_notepad = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_notepad)
+        self.assertEqual(
+            trace_notepad.final_response,
+            "No, Notepad is not open (no matching visible window or running process was found).",
+        )
+
+        # Check if Chrome is open -> MUST match Chrome!
+        trace_chrome = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_chrome)
+        self.assertEqual(
+            trace_chrome.final_response,
+            'Yes, Google Chrome is open with an active visible window: "Untitled - Notepad".',
+        )
+
+    def test_valid_empty_collections(self):
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+        self.process_tool.data = {
+            "total_processes_scanned": 0,
+            "returned_count": 0,
+            "scan_complete": True,
+            "access_denied_count": 0,
+            "processes": [],
+        }
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace.final_response,
+            "No, Notepad is not running (no matching process or window was found).",
+        )
+
+
+class TestProcessScanCompletenessAndDiagnostics(unittest.TestCase):
+    """
+    Tests for process scan completeness, AccessDenied diagnostics, and router handling:
+    - ListProcessesTool access_denied_count, vanished_count, and scan_complete
+    - Distinguishing AccessDenied from normal NoSuchProcess races
+    - Partial scan does not report confident "not running" when application is absent
+    - Positive match confirms running even with partial scan
+    - Conclusive visible-window observations are unaffected by partial process scan
+    """
+
+    def setUp(self):
+        self.registry = ToolRegistry()
+        self.windows_tool = DummyMockTool(
+            "list_open_windows",
+            output_text="Desktop Windows",
+            data={"returned_count": 0, "windows": []},
+        )
+        self.process_tool = DummyMockTool(
+            "list_processes",
+            output_text="Running Processes",
+            data={"total_processes_scanned": 0, "returned_count": 0, "processes": []},
+        )
+        self.registry.register(self.windows_tool)
+        self.registry.register(self.process_tool)
+        self.router = FastPathRouter(tool_registry=self.registry, enabled=True)
+
+    @patch("psutil.process_iter")
+    def test_list_processes_tool_access_denied_diagnostic(self, mock_iter):
+        from exocortex.tools.windows.processes import ListProcessesTool
+        import psutil
+
+        p1 = MagicMock()
+        p1.pid = 100
+        p1.info = {"pid": 100, "name": "user_app.exe", "memory_info": MagicMock(rss=10485760)}
+
+        p2 = MagicMock()
+        p2.pid = 4
+        # Simulate AccessDenied when accessing info
+        type(p2).info = unittest.mock.PropertyMock(side_effect=psutil.AccessDenied(pid=4))
+
+        mock_iter.return_value = [p1, p2]
+
+        tool = ListProcessesTool()
+        res = tool.run(all_processes=True)
+        self.assertTrue(res.success)
+        self.assertEqual(res.data["access_denied_count"], 1)
+        self.assertEqual(res.data["vanished_count"], 0)
+        self.assertFalse(res.data["scan_complete"])
+        self.assertEqual(len(res.data["processes"]), 1)
+        self.assertEqual(res.data["processes"][0]["name"], "user_app.exe")
+
+    @patch("psutil.process_iter")
+    def test_list_processes_tool_no_such_process_does_not_mark_partial(self, mock_iter):
+        from exocortex.tools.windows.processes import ListProcessesTool
+        import psutil
+
+        p1 = MagicMock()
+        p1.pid = 100
+        p1.info = {"pid": 100, "name": "user_app.exe", "memory_info": MagicMock(rss=10485760)}
+
+        p2 = MagicMock()
+        p2.pid = 999
+        # Simulate transient process exit race (NoSuchProcess)
+        type(p2).info = unittest.mock.PropertyMock(side_effect=psutil.NoSuchProcess(pid=999))
+
+        mock_iter.return_value = [p1, p2]
+
+        tool = ListProcessesTool()
+        res = tool.run(all_processes=True)
+        self.assertTrue(res.success)
+        self.assertEqual(res.data["access_denied_count"], 0)
+        self.assertEqual(res.data["vanished_count"], 1)
+        self.assertTrue(res.data["scan_complete"])
+        self.assertEqual(len(res.data["processes"]), 1)
+
+    def test_positive_match_confirms_running_even_with_partial_scan(self):
+        # Notepad is present in the accessible portion of a partial scan
+        self.process_tool.data = {
+            "total_processes_scanned": 150,
+            "returned_count": 1,
+            "access_denied_count": 5,
+            "scan_complete": False,
+            "processes": [{"name": "notepad.exe", "pid": 1234, "memory_mb": 18.5}],
+        }
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(trace.final_response, "Yes, Notepad is running (PID: 1234).")
+        # Short-circuited after single tool step
+        self.assertEqual(len(trace.steps), 1)
+        self.assertEqual(trace.steps[0].tool_name, "list_processes")
+
+    def test_no_match_with_partial_scan_returns_uncertain_observation(self):
+        # Notepad is NOT found, but scan was partial due to 8 inaccessible processes
+        self.process_tool.data = {
+            "total_processes_scanned": 150,
+            "returned_count": 0,
+            "access_denied_count": 8,
+            "scan_complete": False,
+            "processes": [],
+        }
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        # Must NOT produce a false confident "not running"
+        self.assertNotIn("No, Notepad is not running", trace.final_response)
+        self.assertIn("Could not confirm whether Notepad is running", trace.final_response)
+        self.assertIn("process scan was partial", trace.final_response)
+        self.assertIn("8 inaccessible elevated/system processes", trace.final_response)
+        # Two-step trace recorded
+        self.assertEqual(len(trace.steps), 2)
+
+    def test_no_match_with_complete_scan_returns_conclusive_not_running(self):
+        self.process_tool.data = {
+            "total_processes_scanned": 200,
+            "returned_count": 0,
+            "access_denied_count": 0,
+            "scan_complete": True,
+            "processes": [],
+        }
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace.final_response,
+            "No, Notepad is not running (no matching process or window was found).",
+        )
+
+    def test_conclusive_visible_window_unaffected_by_process_partiality(self):
+        # Visible window is found -> 'open' and 'active' short-circuit without calling process tool
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Document - Notepad", "process_name": "notepad.exe", "is_active": True}],
+        }
+        # Process tool has partial scan, but should never even be called
+        self.process_tool.data = {
+            "access_denied_count": 10,
+            "scan_complete": False,
+            "processes": [],
+        }
+        trace_open = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(trace_open.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_open.final_response,
+            'Yes, Notepad is open with an active visible window: "Document - Notepad".',
+        )
+        self.assertEqual(len(trace_open.steps), 1)
+        self.assertEqual(self.process_tool.call_count, 0)
+
+    def test_active_and_open_partial_scan_background_diagnostic(self):
+        # No visible window, and process scan is partial
+        self.windows_tool.data = {"returned_count": 0, "windows": []}
+        self.process_tool.data = {
+            "access_denied_count": 4,
+            "scan_complete": False,
+            "processes": [],
+        }
+        trace_active = self.router.try_execute("is notepad active?")
+        self.assertIsNotNone(trace_active)
+        self.assertEqual(trace_active.status, ExecutionStatus.COMPLETED)
+        self.assertIn("No, Notepad is not active (no visible window found)", trace_active.final_response)
+        self.assertIn("partial (4 inaccessible processes)", trace_active.final_response)
+
+        trace_open = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(trace_open.status, ExecutionStatus.COMPLETED)
+        self.assertIn("No, Notepad is not open (no matching visible window was found)", trace_open.final_response)
+        self.assertIn("partial (4 inaccessible processes)", trace_open.final_response)
+
+
+class TestConservativeTitleFallbackHardening(unittest.TestCase):
+    """
+    Tests for conservative title fallback hardening:
+    - Interior word substring matching MUST be rejected when process identity is unknown:
+      * 'Why Notepad is Obsolete - YouTube'
+      * 'Download Google Chrome installer - TechBlog'
+      * 'How to configure Windows Terminal - Tutorial'
+      * 'Cancelling your Spotify subscription - Edge'
+    - Exact and title-ending matches MUST be accepted when process identity is unknown:
+      * 'Untitled - Notepad'
+      * '(4) YouTube - Google Chrome'
+      * 'New Tab - Google Chrome'
+      * 'Windows Terminal'
+    - Positive and negative tests for all supported application aliases
+    """
+
+    def setUp(self):
+        self.registry = ToolRegistry()
+        self.windows_tool = DummyMockTool(
+            "list_open_windows",
+            output_text="Desktop Windows",
+            data={"returned_count": 0, "windows": []},
+        )
+        self.process_tool = DummyMockTool(
+            "list_processes",
+            output_text="Running Processes",
+            data={"total_processes_scanned": 0, "returned_count": 0, "processes": []},
+        )
+        self.registry.register(self.windows_tool)
+        self.registry.register(self.process_tool)
+        self.router = FastPathRouter(tool_registry=self.registry, enabled=True)
+
+    def test_rejection_of_interior_word_substring_matches_when_unknown(self):
+        adversarial_cases = [
+            ("is notepad open?", "Why Notepad is Obsolete - YouTube"),
+            ("is chrome open?", "Download Google Chrome installer - TechBlog"),
+            ("is windows terminal open?", "How to configure Windows Terminal - Tutorial"),
+            ("is spotify open?", "Cancelling your Spotify subscription - Edge"),
+            ("is vscode open?", "Developing in Visual Studio Code - Browser"),
+            ("is firefox open?", "Firefox vs Chrome comparison - Medium"),
+        ]
+        for query, adversarial_title in adversarial_cases:
+            with self.subTest(query=query, title=adversarial_title):
+                self.windows_tool.data = {
+                    "returned_count": 1,
+                    "windows": [{"title": adversarial_title, "process_name": "unknown", "is_active": True}],
+                }
+                self.process_tool.data = {"returned_count": 0, "processes": []}
+                trace = self.router.try_execute(query)
+                self.assertIsNotNone(trace)
+                self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+                # Must be rejected because title only contains the app name as an interior substring
+                self.assertIn("not open", trace.final_response)
+
+    def test_acceptance_of_proper_title_endings_and_exact_titles_when_unknown(self):
+        genuine_cases = [
+            ("is notepad open?", "Untitled - Notepad", "Notepad"),
+            ("is chrome open?", "(4) YouTube - Google Chrome", "Google Chrome"),
+            ("is chrome open?", "New Tab - Google Chrome", "Google Chrome"),
+            ("is windows terminal open?", "Windows Terminal", "Windows Terminal"),
+            ("is spotify open?", "Spotify Free", "Spotify"),
+            ("is spotify open?", "Spotify", "Spotify"),
+            ("is vscode open?", "app.py - Visual Studio Code", "Visual Studio Code"),
+            ("is firefox open?", "Mozilla Firefox", "Mozilla Firefox"),
+        ]
+        for query, genuine_title, app_name in genuine_cases:
+            with self.subTest(query=query, title=genuine_title):
+                self.windows_tool.data = {
+                    "returned_count": 1,
+                    "windows": [{"title": genuine_title, "process_name": "unknown", "is_active": True}],
+                }
+                trace = self.router.try_execute(query)
+                self.assertIsNotNone(trace)
+                self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+                self.assertIn(f'Yes, {app_name} is open with an active visible window: "{genuine_title}".', trace.final_response)
+
+    def test_all_approved_application_aliases_positive_and_negative(self):
+        from exocortex.execution.fast_path import APPROVED_APPLICATION_MAP
+
+        for alias, app_meta in APPROVED_APPLICATION_MAP.items():
+            query = f"is {alias} open?"
+            # 1. Negative test: title does not match
+            self.windows_tool.data = {
+                "returned_count": 1,
+                "windows": [{"title": "Unrelated Document - Word", "process_name": "unknown", "is_active": True}],
+            }
+            self.process_tool.data = {"returned_count": 0, "processes": []}
+            trace_neg = self.router.try_execute(query)
+            self.assertIsNotNone(trace_neg)
+            self.assertIn("not open", trace_neg.final_response)
+
+            # 2. Positive test: title matches an approved pattern ending
+            pattern = app_meta.window_title_patterns[0]
+            matched_title = f"My File {pattern}" if not pattern.startswith("-") and not pattern.startswith("—") else f"My File {pattern}"
+            self.windows_tool.data = {
+                "returned_count": 1,
+                "windows": [{"title": matched_title, "process_name": "unknown", "is_active": True}],
+            }
+            trace_pos = self.router.try_execute(query)
+            self.assertIsNotNone(trace_pos)
+            self.assertIn("is open with an active visible window", trace_pos.final_response)
+
 
 if __name__ == "__main__":
     unittest.main()

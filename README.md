@@ -4,7 +4,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Windows%2010-blue.svg)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/Tests-264%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-288%20Passed-brightgreen.svg)]()
 
 ExoCortex is a hardware-agnostic, local-first AI agent for Windows that interprets natural-language requests, reasons through tasks, and executes them using permission-controlled desktop tools.
 
@@ -93,7 +93,7 @@ The execution engine supports a three-tier permission model:
 1. **Desktop Awareness**:
    - `list_open_windows`: Enumerates visible top-level application windows using Win32 `EnumWindows` and `DwmGetWindowAttribute` APIs, safely filtering cloaked and hidden background processes.
    - `inspect_window_ui_elements`: Inspects the interactive UI Automation element tree of a target window via Windows Accessibility APIs, bounded by depth and element count limits.
-   - `list_processes`: Inspects running system processes with PID, executable name, and memory telemetry.
+   - `list_processes`: Inspects running system processes accessible under the current user session with PID, executable name, and memory telemetry. Supports all-process mode (`all_processes=True`) and exposes `access_denied_count` and `scan_complete` diagnostics.
 2. **Workspace Filesystem**:
    - `list_directory`: Lists directory contents strictly confined inside `~/.exocortex/workspace`. Directory traversal (`..`) is strictly blocked.
    - `read_text_file`: Reads text files inside the workspace sandbox (up to 1 MB).
@@ -125,16 +125,20 @@ High-frequency deterministic desktop requests bypass model deliberation entirely
 - **Parameterized Application-State Routing**:
   - **Scope**: Targeted natural-language inquiries checking application state (`is <app> open?`, `is <app> running?`, `is <app> active?`, `check if <app> is running`, `do I have <app> open?`).
   - **Supported Applications**: Curated, verified Windows applications: `Notepad`, `Google Chrome`, `Mozilla Firefox`, `Spotify`, `Visual Studio Code` (`VS Code`), and `Windows Terminal`. Unrecognized or ambiguous aliases (`browser`, `terminal`, `editor`) safely fall through to general model deliberation.
-  - **Identity-First Security & Correctness**: Process identity strictly takes precedence. Window titles never override a known mismatching process name (e.g. Notepad displaying `chrome_flags.txt` is never identified as Chrome). Title fallback is strictly restricted to cases where the process name is genuinely unavailable (`unknown`) using tightened, application-specific patterns.
+  - **Identity-First Security & Correctness**: Process identity strictly takes precedence. Window titles never override a known mismatching process name (e.g. Notepad displaying `chrome_flags.txt` is never identified as Chrome). Title fallback is strictly restricted to cases where the process name is genuinely unavailable (`unknown`) using tightened, application-specific patterns matching exact titles or title endings, rejecting interior word matches (e.g., articles or tutorials merely mentioning an application).
+  - **Process Scan Completeness & Honest Negative Reporting**:
+    - All-process mode (`all_processes=True`) inspects all processes accessible under the current user privilege level, not guaranteeing access to elevated OS services.
+    - Inaccessible processes raising `AccessDenied` are tracked via `access_denied_count`, distinguishing partial scans from complete scans (`scan_complete=True`).
+    - Confirming negative running state ("not running") requires a sufficiently complete process scan (`scan_complete=True`). If elevated processes are inaccessible and no visible window exists, the router returns an honest, controlled uncertain observation reporting the partial scan rather than asserting a false negative.
   - **Semantic State Distinctions**:
     - **Active Foreground**: A matching top-level window is verified as holding the active Win32 keyboard foreground focus.
     - **Open with Visible Window**: One or more visible top-level windows matching the application exist on the desktop.
     - **Running in Background**: One or more OS processes exist, but no visible top-level window was found.
-    - **Not Running**: Conclusively verified absent across both process enumeration and desktop windows.
+    - **Not Running**: Conclusively verified absent across both desktop windows and a complete accessible process scan (`scan_complete=True`).
   - **Intent-Specific Short-Circuiting & Latency**:
     - Queries for `open` or `active` inspect desktop windows first: if a matching visible window is confirmed, the router short-circuits and answers immediately (**~1–5 ms**).
-    - Queries for `running` inspect OS processes first: if a matching process is confirmed, it answers immediately without unnecessary window enumeration.
-    - Confirming absence ("not running") or background status requires complete process and window enumeration; latency scales with host process count (**~0.8–2.5 s** over 350+ system processes), providing a deterministic factual answer while saving 100% of LLM inference latency (~90–180s on CPU).
+    - Queries for `running` inspect OS processes first: if a matching process is confirmed, it answers immediately without unnecessary window enumeration (**~15–50 ms** depending on process position).
+    - Conclusively verifying absence ("not running") requires complete accessible process and window enumeration; latency scales with host process count (**~0.7–2.5 s** over 350+ system processes), providing a deterministic factual answer while saving 100% of LLM inference latency (~90–180s on CPU).
 
 ### 2. Direct Observation Completion
 When a user prompt resolves to a single read-only desktop observation (such as `list_open_windows`, `list_processes`, or `inspect_window_ui_elements`), the observation output is returned directly to the user:
