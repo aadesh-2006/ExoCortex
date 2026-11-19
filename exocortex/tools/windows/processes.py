@@ -46,10 +46,18 @@ class ListProcessesTool(BaseTool):
             required=False,
             default="memory",
         ),
+        ToolParameter(
+            name="all_processes",
+            type="boolean",
+            description="If True, return all running processes without truncation (default: False).",
+            required=False,
+            default=False,
+        ),
     ]
 
     def run(self, **kwargs: Any) -> ToolResult:
-        limit = min(max(int(kwargs.get("limit", 20)), 1), 50)
+        all_processes = bool(kwargs.get("all_processes", False))
+        limit_val = kwargs.get("limit", 20)
         sort_by = str(kwargs.get("sort_by", "memory")).lower()
 
         process_list: List[Dict[str, Any]] = []
@@ -68,7 +76,7 @@ class ListProcessesTool(BaseTool):
                         "name": name,
                         "memory_mb": mem_mb,
                     })
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                     continue
 
             # Sort
@@ -77,10 +85,19 @@ class ListProcessesTool(BaseTool):
             else:
                 process_list.sort(key=lambda x: x["memory_mb"], reverse=True)
 
-            top_processes = process_list[:limit]
+            if all_processes:
+                top_processes = process_list
+                table_title = f"All {len(top_processes)} Running Processes (Sorted by {sort_by}):"
+            else:
+                try:
+                    limit = min(max(int(limit_val), 1), 50)
+                except (ValueError, TypeError):
+                    limit = 20
+                top_processes = process_list[:limit]
+                table_title = f"Top {len(top_processes)} Running Processes (Sorted by {sort_by}):"
 
             # Format summary table
-            lines = [f"Top {len(top_processes)} Running Processes (Sorted by {sort_by}):"]
+            lines = [table_title]
             lines.append(f"  {'PID':<8} {'Process Name':<35} {'Memory (MB)':>12}")
             lines.append("  " + "-" * 57)
             for proc in top_processes:

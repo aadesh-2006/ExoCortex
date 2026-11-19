@@ -3,10 +3,10 @@ Deterministic Fast-Path Router for Canonical and Parameterized Desktop Requests 
 
 Bypasses heavy SLM inference for:
 1. Unambiguous, canonical zero-argument desktop requests (e.g., list open windows, list processes).
-2. Parameterized application-state inquiries (e.g., is <app> open?, is <app> running?).
+2. Parameterized application-state inquiries (e.g., is <app> open?, is <app> running?, is <app> active?).
 
 Executes strictly through ToolRegistry.execute(), preserving all permission boundaries,
-execution traces, and returning structured factual answers without invoking Qwen3:4B.
+execution traces, identity-first matching, and returning structured factual answers without invoking Qwen3:4B.
 """
 
 from __future__ import annotations
@@ -110,62 +110,62 @@ class ApplicationMetadata:
 
 
 # Explicit, small alias mapping for commonly recognizable applications.
-# Preserves case-insensitive lookup and Windows executable conventions.
+# Title patterns are strictly tightened to avoid false-positive substring matches.
 APPROVED_APPLICATION_MAP: Dict[str, ApplicationMetadata] = {
     "notepad": ApplicationMetadata(
         display_name="Notepad",
         executable_names=("notepad.exe",),
-        window_title_patterns=("notepad",),
+        window_title_patterns=("- notepad", "— notepad", "notepad"),
     ),
     "windows notepad": ApplicationMetadata(
         display_name="Notepad",
         executable_names=("notepad.exe",),
-        window_title_patterns=("notepad",),
+        window_title_patterns=("- notepad", "— notepad", "notepad"),
     ),
     "chrome": ApplicationMetadata(
         display_name="Google Chrome",
         executable_names=("chrome.exe",),
-        window_title_patterns=("google chrome", "chrome"),
+        window_title_patterns=("- google chrome", "— google chrome", "google chrome"),
     ),
     "google chrome": ApplicationMetadata(
         display_name="Google Chrome",
         executable_names=("chrome.exe",),
-        window_title_patterns=("google chrome", "chrome"),
+        window_title_patterns=("- google chrome", "— google chrome", "google chrome"),
     ),
     "firefox": ApplicationMetadata(
         display_name="Mozilla Firefox",
         executable_names=("firefox.exe",),
-        window_title_patterns=("mozilla firefox", "firefox"),
+        window_title_patterns=("- mozilla firefox", "— mozilla firefox", "mozilla firefox"),
     ),
     "mozilla firefox": ApplicationMetadata(
         display_name="Mozilla Firefox",
         executable_names=("firefox.exe",),
-        window_title_patterns=("mozilla firefox", "firefox"),
+        window_title_patterns=("- mozilla firefox", "— mozilla firefox", "mozilla firefox"),
     ),
     "spotify": ApplicationMetadata(
         display_name="Spotify",
         executable_names=("spotify.exe",),
-        window_title_patterns=("spotify",),
+        window_title_patterns=("spotify free", "spotify premium", "spotify"),
     ),
     "vscode": ApplicationMetadata(
         display_name="Visual Studio Code",
         executable_names=("code.exe",),
-        window_title_patterns=("visual studio code", "- code"),
+        window_title_patterns=("- visual studio code", "— visual studio code", "visual studio code"),
     ),
     "vs code": ApplicationMetadata(
         display_name="Visual Studio Code",
         executable_names=("code.exe",),
-        window_title_patterns=("visual studio code", "- code"),
+        window_title_patterns=("- visual studio code", "— visual studio code", "visual studio code"),
     ),
     "visual studio code": ApplicationMetadata(
         display_name="Visual Studio Code",
         executable_names=("code.exe",),
-        window_title_patterns=("visual studio code", "- code"),
+        window_title_patterns=("- visual studio code", "— visual studio code", "visual studio code"),
     ),
     "windows terminal": ApplicationMetadata(
         display_name="Windows Terminal",
         executable_names=("windowsterminal.exe",),
-        window_title_patterns=("windows terminal", "terminal"),
+        window_title_patterns=("windows terminal",),
     ),
 }
 
@@ -224,6 +224,84 @@ def normalize_fast_path_query(query: str) -> str:
     # Collapse multiple whitespace characters into a single space
     q = re.sub(r"\s+", " ", q).strip()
     return q
+
+
+def _filter_matching_windows(
+    tool_res_windows: Any,
+    app_meta: ApplicationMetadata,
+) -> List[Dict[str, Any]]:
+    """
+    Identity-first matching for window records:
+    1. If process_name is known (not 'unknown' and non-empty), require exact case-insensitive
+       executable name match. A window title NEVER overrides a known mismatched process name.
+    2. If process identity is genuinely unavailable ('unknown', empty, or missing),
+       conservative, application-specific title matching is used.
+    """
+    windows: List[Dict[str, Any]] = []
+    if isinstance(tool_res_windows.data, dict):
+        windows = tool_res_windows.data.get("windows", [])
+
+    matching_windows: List[Dict[str, Any]] = []
+    for w in windows:
+        proc_name = str(w.get("process_name", "")).strip().lower()
+        title = str(w.get("title", "")).strip().lower()
+        is_proc_known = bool(proc_name and proc_name != "unknown")
+        exe_matches = any(exe.lower() == proc_name for exe in app_meta.executable_names)
+
+        if is_proc_known:
+            # Process identity is known: MUST match an approved executable name
+            if exe_matches:
+                matching_windows.append(w)
+        else:
+            # Conservative fallback only if process identity was genuinely unavailable
+            title_matches = any(
+                title.endswith(pat.lower()) or title == pat.lower() or f" {pat.lower()} " in f" {title} "
+                for pat in app_meta.window_title_patterns
+            )
+            if title_matches:
+                matching_windows.append(w)
+
+    # Fallback for simple mock tools that only populate output string
+    if not matching_windows and not windows and tool_res_windows.output:
+        out_lower = tool_res_windows.output.lower()
+        if any(exe.lower() in out_lower for exe in app_meta.executable_names) or any(
+            pat.lower() in out_lower for pat in app_meta.window_title_patterns
+        ):
+            matching_windows.append({
+                "title": app_meta.display_name,
+                "process_name": app_meta.executable_names[0],
+                "is_active": "[active]" in out_lower,
+            })
+
+    return matching_windows
+
+
+def _filter_matching_processes(
+    tool_res_procs: Any,
+    app_meta: ApplicationMetadata,
+) -> List[Dict[str, Any]]:
+    """Filter processes by exact case-insensitive executable name match."""
+    procs: List[Dict[str, Any]] = []
+    if isinstance(tool_res_procs.data, dict):
+        procs = tool_res_procs.data.get("processes", [])
+
+    matching_processes: List[Dict[str, Any]] = []
+    for p in procs:
+        p_name = str(p.get("name", "")).strip().lower()
+        if any(exe.lower() == p_name for exe in app_meta.executable_names):
+            matching_processes.append(p)
+
+    # Fallback for simple mock tools that only populate output string
+    if not matching_processes and not procs and tool_res_procs.output:
+        out_lower = tool_res_procs.output.lower()
+        if any(exe.lower() in out_lower for exe in app_meta.executable_names):
+            matching_processes.append({
+                "name": app_meta.executable_names[0],
+                "pid": None,
+                "memory_mb": None,
+            })
+
+    return matching_processes
 
 
 class FastPathRouter:
@@ -347,7 +425,6 @@ class FastPathRouter:
 
     def _execute_canonical(self, user_query: str, tool_name: str) -> Optional[ExecutionTrace]:
         """Execute a canonical zero-argument tool request directly."""
-        # Verify tool registration and permission
         tool = self.tool_registry.get_tool(tool_name)
         if not tool:
             logger.warning("Fast-path tool '%s' is not registered. Falling through to SLM.", tool_name)
@@ -364,11 +441,9 @@ class FastPathRouter:
         logger.info("Executing fast-path route for canonical query: '%s' -> %s()", user_query, tool_name)
         start_time = time.perf_counter()
 
-        # Execute safely strictly via ToolRegistry
         tool_res = self.tool_registry.execute(tool_name, {})
         duration_ms = (time.perf_counter() - start_time) * 1000
 
-        # Construct intent and structured decision
         intent = FAST_PATH_INTENT_MAP.get(tool_name, tool_name)
         has_valid_output = bool(tool_res.output and tool_res.output.strip())
         is_success = bool(tool_res.success and has_valid_output)
@@ -437,13 +512,8 @@ class FastPathRouter:
         target_state: str,
     ) -> Optional[ExecutionTrace]:
         """
-        Execute read-only desktop inspection tools to determine application state.
-        
-        Distinguishes:
-        1. Open with visible window.
-        2. Running in background without visible window.
-        3. Not running.
-        4. Active foreground window.
+        Execute read-only desktop inspection tools to determine application state
+        with intent-specific short-circuiting and complete process enumeration.
         """
         # Safety checks: Both tools must be registered and declared SAFE
         tool_windows = self.tool_registry.get_tool("list_open_windows")
@@ -465,189 +535,280 @@ class FastPathRouter:
         )
         total_start = time.perf_counter()
 
-        # Step 1: Execute list_open_windows
-        start_windows = time.perf_counter()
-        tool_res_windows = self.tool_registry.execute("list_open_windows", {})
-        dur_windows = (time.perf_counter() - start_windows) * 1000
+        # =====================================================================
+        # INTENT BRANCH 1: active or open (visible windows queried first)
+        # =====================================================================
+        if target_state in ("open", "active"):
+            start_windows = time.perf_counter()
+            tool_res_windows = self.tool_registry.execute("list_open_windows", {})
+            dur_windows = (time.perf_counter() - start_windows) * 1000
 
-        if not tool_res_windows.success:
-            err = tool_res_windows.error or "Failed to enumerate desktop windows."
-            return self._build_app_state_error_trace(
-                user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
-            )
+            if not tool_res_windows.success:
+                err = tool_res_windows.error or "Failed to enumerate desktop windows."
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
+                )
 
-        if not tool_res_windows.output or not tool_res_windows.output.strip():
-            err = "Tool 'list_open_windows' returned empty output."
-            return self._build_app_state_error_trace(
-                user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
-            )
+            if not tool_res_windows.output or not tool_res_windows.output.strip():
+                err = "Tool 'list_open_windows' returned empty output."
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows
+                )
 
-        # Step 2: Execute list_processes
-        start_procs = time.perf_counter()
-        tool_res_procs = self.tool_registry.execute("list_processes", {})
-        dur_procs = (time.perf_counter() - start_procs) * 1000
+            matching_windows = _filter_matching_windows(tool_res_windows, app_meta)
+            has_visible_window = len(matching_windows) > 0
+            is_active_window = any(bool(w.get("is_active")) for w in matching_windows)
 
-        if not tool_res_procs.success:
-            err = tool_res_procs.error or "Failed to inspect processes."
-            return self._build_app_state_error_trace(
-                user_query,
-                "list_processes",
-                tool_procs,
-                tool_res_procs,
-                err,
-                dur_procs,
-                prior_tool="list_open_windows",
-                prior_result=tool_res_windows,
-                prior_tool_obj=tool_windows,
-                prior_dur=dur_windows,
-            )
+            titles = [w.get("title", "").strip() for w in matching_windows if w.get("title")]
+            first_title = titles[0] if titles else app_meta.display_name
 
-        if not tool_res_procs.output or not tool_res_procs.output.strip():
-            err = "Tool 'list_processes' returned empty output."
-            return self._build_app_state_error_trace(
-                user_query,
-                "list_processes",
-                tool_procs,
-                tool_res_procs,
-                err,
-                dur_procs,
-                prior_tool="list_open_windows",
-                prior_result=tool_res_windows,
-                prior_tool_obj=tool_windows,
-                prior_dur=dur_windows,
-            )
-
-        # Filter windows
-        windows: List[Dict[str, Any]] = []
-        if isinstance(tool_res_windows.data, dict):
-            windows = tool_res_windows.data.get("windows", [])
-
-        matching_windows: List[Dict[str, Any]] = []
-        for w in windows:
-            proc_name = str(w.get("process_name", "")).lower()
-            title = str(w.get("title", "")).lower()
-            exe_matches = any(exe.lower() == proc_name for exe in app_meta.executable_names)
-            title_matches = any(pat.lower() in title for pat in app_meta.window_title_patterns)
-            if exe_matches or title_matches:
-                matching_windows.append(w)
-
-        # Fallback for mock tools that only populate output string
-        if not matching_windows and not windows and tool_res_windows.output:
-            out_lower = tool_res_windows.output.lower()
-            if any(exe.lower() in out_lower for exe in app_meta.executable_names) or any(
-                pat.lower() in out_lower for pat in app_meta.window_title_patterns
-            ):
-                matching_windows.append({
-                    "title": app_meta.display_name,
-                    "process_name": app_meta.executable_names[0],
-                    "is_active": "[active]" in out_lower,
-                })
-
-        # Filter processes
-        procs: List[Dict[str, Any]] = []
-        if isinstance(tool_res_procs.data, dict):
-            procs = tool_res_procs.data.get("processes", [])
-
-        matching_processes: List[Dict[str, Any]] = []
-        for p in procs:
-            p_name = str(p.get("name", "")).lower()
-            if any(exe.lower() == p_name for exe in app_meta.executable_names):
-                matching_processes.append(p)
-
-        # Fallback for mock tools that only populate output string
-        if not matching_processes and not procs and tool_res_procs.output:
-            out_lower = tool_res_procs.output.lower()
-            if any(exe.lower() in out_lower for exe in app_meta.executable_names):
-                matching_processes.append({
-                    "name": app_meta.executable_names[0],
-                    "pid": None,
-                    "memory_mb": None,
-                })
-
-        # State determination
-        has_visible_window = len(matching_windows) > 0
-        has_running_process = len(matching_processes) > 0 or has_visible_window
-        is_active_window = any(bool(w.get("is_active")) for w in matching_windows)
-
-        titles = [w.get("title", "").strip() for w in matching_windows if w.get("title")]
-        first_title = titles[0] if titles else app_meta.display_name
-
-        # Response construction strictly adhering to observation state
-        if target_state == "open":
-            if has_visible_window:
+            # Short-circuit policy for 'active'
+            if target_state == "active":
                 if is_active_window:
-                    final_response = f'Yes, {app_meta.display_name} is open with an active visible window: "{first_title}".'
-                else:
-                    final_response = f'Yes, {app_meta.display_name} is open with a visible window: "{first_title}".'
-            elif has_running_process:
-                final_response = f"No visible {app_meta.display_name} window was found, but {app_meta.display_name} is currently running in the background."
-            else:
-                final_response = f"No, {app_meta.display_name} is not open (no matching visible window or running process was found)."
+                    final_response = f'Yes, {app_meta.display_name} is currently the active foreground window: "{first_title}".'
+                    return self._build_single_step_trace(
+                        user_query, "list_open_windows", tool_windows, tool_res_windows, dur_windows,
+                        final_response, app_meta, target_state, total_start
+                    )
+                elif has_visible_window:
+                    final_response = f'No, {app_meta.display_name} is open with a visible window ("{first_title}"), but it is not the active foreground window.'
+                    return self._build_single_step_trace(
+                        user_query, "list_open_windows", tool_windows, tool_res_windows, dur_windows,
+                        final_response, app_meta, target_state, total_start
+                    )
 
+            # Short-circuit policy for 'open'
+            elif target_state == "open":
+                if has_visible_window:
+                    if is_active_window:
+                        final_response = f'Yes, {app_meta.display_name} is open with an active visible window: "{first_title}".'
+                    else:
+                        final_response = f'Yes, {app_meta.display_name} is open with a visible window: "{first_title}".'
+                    return self._build_single_step_trace(
+                        user_query, "list_open_windows", tool_windows, tool_res_windows, dur_windows,
+                        final_response, app_meta, target_state, total_start
+                    )
+
+            # If no visible window found, query complete process list to distinguish background from not-running
+            start_procs = time.perf_counter()
+            tool_res_procs = self.tool_registry.execute("list_processes", {"all_processes": True})
+            dur_procs = (time.perf_counter() - start_procs) * 1000
+
+            if not tool_res_procs.success:
+                err = tool_res_procs.error or "Failed to inspect processes."
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs,
+                    prior_tool="list_open_windows", prior_result=tool_res_windows, prior_tool_obj=tool_windows, prior_dur=dur_windows
+                )
+
+            if not tool_res_procs.output or not tool_res_procs.output.strip():
+                err = "Tool 'list_processes' returned empty output."
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs,
+                    prior_tool="list_open_windows", prior_result=tool_res_windows, prior_tool_obj=tool_windows, prior_dur=dur_windows
+                )
+
+            matching_processes = _filter_matching_processes(tool_res_procs, app_meta)
+            has_running_process = len(matching_processes) > 0
+
+            if target_state == "active":
+                if has_running_process:
+                    final_response = f"No, {app_meta.display_name} is running in the background, but has no visible window and is not active."
+                else:
+                    final_response = f"No, {app_meta.display_name} is not active and is not running."
+            else:  # target_state == "open"
+                if has_running_process:
+                    final_response = f"No visible {app_meta.display_name} window was found, but {app_meta.display_name} is currently running in the background."
+                else:
+                    final_response = f"No, {app_meta.display_name} is not open (no matching visible window or running process was found)."
+
+            return self._build_two_step_trace(
+                user_query,
+                first_tool="list_open_windows", first_tool_obj=tool_windows, first_res=tool_res_windows, first_dur=dur_windows,
+                second_tool="list_processes", second_tool_obj=tool_procs, second_res=tool_res_procs, second_dur=dur_procs,
+                second_args={"all_processes": True},
+                final_response=final_response, app_meta=app_meta, target_state=target_state, total_start=total_start
+            )
+
+        # =====================================================================
+        # INTENT BRANCH 2: running (processes queried first)
+        # =====================================================================
         elif target_state == "running":
-            if has_visible_window:
-                final_response = f'Yes, {app_meta.display_name} is running with a visible window: "{first_title}".'
-            elif has_running_process:
-                proc_info = matching_processes[0] if matching_processes else None
+            start_procs = time.perf_counter()
+            tool_res_procs = self.tool_registry.execute("list_processes", {"all_processes": True})
+            dur_procs = (time.perf_counter() - start_procs) * 1000
+
+            if not tool_res_procs.success:
+                err = tool_res_procs.error or "Failed to inspect processes."
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs
+                )
+
+            if not tool_res_procs.output or not tool_res_procs.output.strip():
+                err = "Tool 'list_processes' returned empty output."
+                return self._build_app_state_error_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, err, dur_procs
+                )
+
+            matching_processes = _filter_matching_processes(tool_res_procs, app_meta)
+
+            # Short-circuit policy for 'running': matching process is sufficient
+            if len(matching_processes) > 0:
+                proc_info = matching_processes[0]
                 pid_str = f" (PID: {proc_info['pid']})" if proc_info and proc_info.get("pid") is not None else ""
-                final_response = f"Yes, {app_meta.display_name} is running in the background{pid_str}. No visible window was found."
+                final_response = f"Yes, {app_meta.display_name} is running{pid_str}."
+                return self._build_single_step_trace(
+                    user_query, "list_processes", tool_procs, tool_res_procs, dur_procs,
+                    final_response, app_meta, target_state, total_start, tool_args={"all_processes": True}
+                )
+
+            # If no process found, query list_open_windows to avoid false negatives from access-denied process enumeration
+            start_windows = time.perf_counter()
+            tool_res_windows = self.tool_registry.execute("list_open_windows", {})
+            dur_windows = (time.perf_counter() - start_windows) * 1000
+
+            if not tool_res_windows.success:
+                err = tool_res_windows.error or "Failed to enumerate desktop windows."
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows,
+                    prior_tool="list_processes", prior_result=tool_res_procs, prior_tool_obj=tool_procs, prior_dur=dur_procs
+                )
+
+            if not tool_res_windows.output or not tool_res_windows.output.strip():
+                err = "Tool 'list_open_windows' returned empty output."
+                return self._build_app_state_error_trace(
+                    user_query, "list_open_windows", tool_windows, tool_res_windows, err, dur_windows,
+                    prior_tool="list_processes", prior_result=tool_res_procs, prior_tool_obj=tool_procs, prior_dur=dur_procs
+                )
+
+            matching_windows = _filter_matching_windows(tool_res_windows, app_meta)
+            if len(matching_windows) > 0:
+                titles = [w.get("title", "").strip() for w in matching_windows if w.get("title")]
+                first_title = titles[0] if titles else app_meta.display_name
+                final_response = f'Yes, {app_meta.display_name} is running with a visible window: "{first_title}".'
             else:
                 final_response = f"No, {app_meta.display_name} is not running (no matching process or window was found)."
 
-        elif target_state == "active":
-            if is_active_window:
-                final_response = f'Yes, {app_meta.display_name} is currently the active foreground window: "{first_title}".'
-            elif has_visible_window:
-                final_response = f'No, {app_meta.display_name} is open with a visible window ("{first_title}"), but it is not the active foreground window.'
-            elif has_running_process:
-                final_response = f"No, {app_meta.display_name} is running in the background, but has no visible window and is not active."
-            else:
-                final_response = f"No, {app_meta.display_name} is not active and is not running."
-        else:
-            return None
+            return self._build_two_step_trace(
+                user_query,
+                first_tool="list_processes", first_tool_obj=tool_procs, first_res=tool_res_procs, first_dur=dur_procs,
+                first_args={"all_processes": True},
+                second_tool="list_open_windows", second_tool_obj=tool_windows, second_res=tool_res_windows, second_dur=dur_windows,
+                final_response=final_response, app_meta=app_meta, target_state=target_state, total_start=total_start
+            )
 
-        # Build execution trace with both observation steps
+        return None
+
+    def _build_single_step_trace(
+        self,
+        user_query: str,
+        tool_name: str,
+        tool_obj: Any,
+        tool_res: Any,
+        duration_ms: float,
+        final_response: str,
+        app_meta: ApplicationMetadata,
+        target_state: str,
+        total_start: float,
+        tool_args: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionTrace:
+        """Construct an ExecutionTrace for a short-circuited single-tool observation."""
+        args = tool_args or {}
+        decision = AgentDecision(
+            thought_summary=f"Parameterized fast path executed for '{app_meta.display_name}' application state ({target_state}).",
+            intent="application_state_inspection",
+            steps=[StructuredStep(tool=tool_name, arguments=args)],
+            requires_confirmation=False,
+            direct_response=final_response,
+        )
+        step = ExecutionStep(
+            step_number=1,
+            timestamp=total_start,
+            decision=decision,
+            action_type=ActionType.TOOL_CALL,
+            tool_name=tool_name,
+            arguments=args,
+            permission_level=tool_obj.permission_level,
+            tool_result=tool_res,
+            observation_text=f"[{tool_name}]: {tool_res.output}",
+            duration_ms=duration_ms,
+            status=ExecutionStatus.COMPLETED,
+            error_message=None,
+        )
+        trace = ExecutionTrace(
+            user_goal=user_query,
+            status=ExecutionStatus.COMPLETED,
+            start_time=total_start,
+            slm_info={
+                "provider": "FastPathRouter",
+                "model_name": "deterministic_fast_path",
+                "is_local": True,
+                "llm_calls": 0,
+            },
+        )
+        trace.steps.append(step)
+        trace.finalize(status=ExecutionStatus.COMPLETED, final_response=final_response, error_message=None)
+        return trace
+
+    def _build_two_step_trace(
+        self,
+        user_query: str,
+        first_tool: str,
+        first_tool_obj: Any,
+        first_res: Any,
+        first_dur: float,
+        second_tool: str,
+        second_tool_obj: Any,
+        second_res: Any,
+        second_dur: float,
+        final_response: str,
+        app_meta: ApplicationMetadata,
+        target_state: str,
+        total_start: float,
+        first_args: Optional[Dict[str, Any]] = None,
+        second_args: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionTrace:
+        """Construct an ExecutionTrace for a two-tool observation."""
+        f_args = first_args or {}
+        s_args = second_args or {}
         decision = AgentDecision(
             thought_summary=f"Parameterized fast path executed for '{app_meta.display_name}' application state ({target_state}).",
             intent="application_state_inspection",
             steps=[
-                StructuredStep(tool="list_open_windows", arguments={}),
-                StructuredStep(tool="list_processes", arguments={}),
+                StructuredStep(tool=first_tool, arguments=f_args),
+                StructuredStep(tool=second_tool, arguments=s_args),
             ],
             requires_confirmation=False,
             direct_response=final_response,
         )
-
         step1 = ExecutionStep(
             step_number=1,
-            timestamp=start_windows,
+            timestamp=total_start,
             decision=decision,
             action_type=ActionType.TOOL_CALL,
-            tool_name="list_open_windows",
-            arguments={},
-            permission_level=tool_windows.permission_level,
-            tool_result=tool_res_windows,
-            observation_text=f"[list_open_windows]: {tool_res_windows.output}",
-            duration_ms=dur_windows,
+            tool_name=first_tool,
+            arguments=f_args,
+            permission_level=first_tool_obj.permission_level,
+            tool_result=first_res,
+            observation_text=f"[{first_tool}]: {first_res.output}",
+            duration_ms=first_dur,
             status=ExecutionStatus.COMPLETED,
             error_message=None,
         )
-
         step2 = ExecutionStep(
             step_number=2,
-            timestamp=start_procs,
+            timestamp=time.time(),
             decision=decision,
             action_type=ActionType.TOOL_CALL,
-            tool_name="list_processes",
-            arguments={},
-            permission_level=tool_procs.permission_level,
-            tool_result=tool_res_procs,
-            observation_text=f"[list_processes]: {tool_res_procs.output}",
-            duration_ms=dur_procs,
+            tool_name=second_tool,
+            arguments=s_args,
+            permission_level=second_tool_obj.permission_level,
+            tool_result=second_res,
+            observation_text=f"[{second_tool}]: {second_res.output}",
+            duration_ms=second_dur,
             status=ExecutionStatus.COMPLETED,
             error_message=None,
         )
-
         trace = ExecutionTrace(
             user_goal=user_query,
             status=ExecutionStatus.COMPLETED,
@@ -660,12 +821,7 @@ class FastPathRouter:
             },
         )
         trace.steps.extend([step1, step2])
-        trace.finalize(
-            status=ExecutionStatus.COMPLETED,
-            final_response=final_response,
-            error_message=None,
-        )
-
+        trace.finalize(status=ExecutionStatus.COMPLETED, final_response=final_response, error_message=None)
         return trace
 
     def _build_app_state_error_trace(

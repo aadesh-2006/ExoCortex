@@ -527,8 +527,10 @@ class TestApplicationStateRouting(unittest.TestCase):
         self.assertEqual(trace_running.status, ExecutionStatus.COMPLETED)
         self.assertEqual(
             trace_running.final_response,
-            'Yes, Notepad is running with a visible window: "notes.txt - Notepad".',
+            'Yes, Notepad is running (PID: 1234).',
         )
+        self.assertEqual(len(trace_running.steps), 1)
+        self.assertEqual(trace_running.steps[0].tool_name, "list_processes")
 
         # Check 'active' (when not active foreground window)
         trace_active = self.router.try_execute("is notepad active?")
@@ -583,11 +585,13 @@ class TestApplicationStateRouting(unittest.TestCase):
             "No visible Google Chrome window was found, but Google Chrome is currently running in the background.",
         )
 
-        # Check 'running' -> reports running in background
+        # Check 'running' -> reports running via process short-circuit
         trace_running = self.router.try_execute("is chrome running?")
         self.assertIsNotNone(trace_running)
         self.assertEqual(trace_running.status, ExecutionStatus.COMPLETED)
-        self.assertIn("Yes, Google Chrome is running in the background (PID: 4567)", trace_running.final_response)
+        self.assertEqual(trace_running.final_response, "Yes, Google Chrome is running (PID: 4567).")
+        self.assertEqual(len(trace_running.steps), 1)
+        self.assertEqual(trace_running.steps[0].tool_name, "list_processes")
 
         # Check 'active' -> reports running in background, not active
         trace_active = self.router.try_execute("is chrome active?")
@@ -763,6 +767,234 @@ class TestApplicationStateRouting(unittest.TestCase):
         self.assertTrue(res2.success)
         self.assertEqual(res2.slm_info.get("provider"), "MockSLMProvider")
         self.assertEqual(mock_slm.generate.call_count, 1)
+
+    def test_window_identity_process_name_overrides_mismatching_title(self):
+        """
+        Verify identity-first matching:
+        A matching title MUST NEVER override a known mismatching process name.
+        """
+        # 1. Notepad displaying 'chrome_flags.txt' is NOT Chrome
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "chrome_flags.txt - Notepad", "process_name": "notepad.exe", "is_active": False}],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. \"chrome_flags.txt - Notepad\" (notepad.exe)"
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        self.process_tool.output_text = "Top 0 Running Processes."
+
+        trace_chrome = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_chrome)
+        self.assertEqual(trace_chrome.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(
+            trace_chrome.final_response,
+            "No, Google Chrome is not open (no matching visible window or running process was found).",
+        )
+
+        # 2. Edge displaying 'How to Install Windows Terminal' is NOT Windows Terminal
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "How to Install Windows Terminal - Microsoft Edge", "process_name": "msedge.exe", "is_active": False}],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. \"How to Install Windows Terminal - Microsoft Edge\" (msedge.exe)"
+        trace_wt = self.router.try_execute("is windows terminal open?")
+        self.assertIsNotNone(trace_wt)
+        self.assertEqual(
+            trace_wt.final_response,
+            "No, Windows Terminal is not open (no matching visible window or running process was found).",
+        )
+
+        # 3. Unrelated application displaying '- code' is NOT VS Code
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "morse-code.py - Notepad", "process_name": "notepad.exe", "is_active": False}],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. \"morse-code.py - Notepad\" (notepad.exe)"
+        trace_vsc = self.router.try_execute("is vs code open?")
+        self.assertIsNotNone(trace_vsc)
+        self.assertEqual(
+            trace_vsc.final_response,
+            "No, Visual Studio Code is not open (no matching visible window or running process was found).",
+        )
+
+        # 4. Correct executable and valid title is accepted
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "GitHub - Google Chrome", "process_name": "chrome.exe", "is_active": True}],
+        }
+        self.windows_tool.output_text = "Visible Desktop Windows (1 found):\n1. [ACTIVE] \"GitHub - Google Chrome\" (chrome.exe)"
+        trace_real_chrome = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_real_chrome)
+        self.assertEqual(
+            trace_real_chrome.final_response,
+            'Yes, Google Chrome is open with an active visible window: "GitHub - Google Chrome".',
+        )
+
+    def test_unknown_process_identity_conservative_fallback(self):
+        """
+        When process identity is genuinely unknown ('unknown', missing),
+        title fallback applies only with conservative application-specific patterns.
+        """
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        self.process_tool.output_text = "Top 0 Running Processes."
+
+        # 1. Unknown process with generic title 'chrome_flags.txt' -> NOT Chrome
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "chrome_flags.txt", "process_name": "unknown", "is_active": False}],
+        }
+        trace_generic = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_generic)
+        self.assertEqual(
+            trace_generic.final_response,
+            "No, Google Chrome is not open (no matching visible window or running process was found).",
+        )
+
+        # 2. Unknown process with tightened Chrome title '- Google Chrome' -> IS Chrome
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "New Tab - Google Chrome", "process_name": "unknown", "is_active": False}],
+        }
+        trace_chrome_fallback = self.router.try_execute("is chrome open?")
+        self.assertIsNotNone(trace_chrome_fallback)
+        self.assertEqual(
+            trace_chrome_fallback.final_response,
+            'Yes, Google Chrome is open with a visible window: "New Tab - Google Chrome".',
+        )
+
+        # 3. Unknown process with tightened Windows Terminal title -> IS Windows Terminal
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Windows Terminal", "process_name": "unknown", "is_active": False}],
+        }
+        trace_wt_fallback = self.router.try_execute("is windows terminal open?")
+        self.assertIsNotNone(trace_wt_fallback)
+        self.assertEqual(
+            trace_wt_fallback.final_response,
+            'Yes, Windows Terminal is open with a visible window: "Windows Terminal".',
+        )
+
+        # 4. Unknown process with bare 'Terminal' title -> NOT Windows Terminal
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "Terminal", "process_name": "unknown", "is_active": False}],
+        }
+        trace_bare_terminal = self.router.try_execute("is windows terminal open?")
+        self.assertIsNotNone(trace_bare_terminal)
+        self.assertEqual(
+            trace_bare_terminal.final_response,
+            "No, Windows Terminal is not open (no matching visible window or running process was found).",
+        )
+
+    def test_complete_process_enumeration_below_top_20(self):
+        """
+        Verify that an application ranked well below the top 20 memory consumers
+        is still completely detected by the router when all_processes=True is used.
+        """
+        # Create 35 dummy high-memory processes
+        dummy_procs = [
+            {"name": f"heavy_proc_{i}.exe", "pid": 1000 + i, "memory_mb": 500.0 - i}
+            for i in range(25)
+        ]
+        # Append target application at rank #26 (below top 20)
+        dummy_procs.append({"name": "notepad.exe", "pid": 9999, "memory_mb": 12.0})
+
+        self.process_tool.data = {
+            "total_processes_scanned": len(dummy_procs),
+            "returned_count": len(dummy_procs),
+            "processes": dummy_procs,
+        }
+        self.process_tool.output_text = "Processes output..."
+
+        trace = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace)
+        self.assertEqual(trace.status, ExecutionStatus.COMPLETED)
+        self.assertEqual(trace.final_response, "Yes, Notepad is running (PID: 9999).")
+        self.assertEqual(len(trace.steps), 1)
+
+    def test_observation_short_circuit_policies(self):
+        """
+        Verify intent-specific observation short-circuiting:
+        - 'open' short-circuits process listing when visible window is found.
+        - 'active' short-circuits process listing when visible window is found.
+        - 'running' short-circuits window listing when matching process is found.
+        - 'running' falls back to window listing when process is not found.
+        """
+        # 1. 'open' short-circuits process query
+        self.windows_tool.call_count = 0
+        self.process_tool.call_count = 0
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "notes.txt - Notepad", "process_name": "notepad.exe", "is_active": False}],
+        }
+        trace_open = self.router.try_execute("is notepad open?")
+        self.assertIsNotNone(trace_open)
+        self.assertEqual(len(trace_open.steps), 1)
+        self.assertEqual(trace_open.steps[0].tool_name, "list_open_windows")
+        self.assertEqual(self.windows_tool.call_count, 1)
+        self.assertEqual(self.process_tool.call_count, 0)
+
+        # 2. 'active' short-circuits process query
+        self.windows_tool.call_count = 0
+        self.process_tool.call_count = 0
+        trace_active = self.router.try_execute("is notepad active?")
+        self.assertIsNotNone(trace_active)
+        self.assertEqual(len(trace_active.steps), 1)
+        self.assertEqual(trace_active.steps[0].tool_name, "list_open_windows")
+        self.assertEqual(self.windows_tool.call_count, 1)
+        self.assertEqual(self.process_tool.call_count, 0)
+
+        # 3. 'running' short-circuits windows query when process exists
+        self.windows_tool.call_count = 0
+        self.process_tool.call_count = 0
+        self.process_tool.data = {
+            "returned_count": 1,
+            "processes": [{"name": "notepad.exe", "pid": 1234, "memory_mb": 15.0}],
+        }
+        trace_running = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace_running)
+        self.assertEqual(len(trace_running.steps), 1)
+        self.assertEqual(trace_running.steps[0].tool_name, "list_processes")
+        self.assertEqual(self.process_tool.call_count, 1)
+        self.assertEqual(self.windows_tool.call_count, 0)
+
+        # 4. 'running' falls back to windows when process is absent
+        self.windows_tool.call_count = 0
+        self.process_tool.call_count = 0
+        self.process_tool.data = {"returned_count": 0, "processes": []}
+        self.windows_tool.data = {
+            "returned_count": 1,
+            "windows": [{"title": "notes.txt - Notepad", "process_name": "notepad.exe", "is_active": False}],
+        }
+        trace_running_fallback = self.router.try_execute("is notepad running?")
+        self.assertIsNotNone(trace_running_fallback)
+        self.assertEqual(len(trace_running_fallback.steps), 2)
+        self.assertEqual(trace_running_fallback.steps[0].tool_name, "list_processes")
+        self.assertEqual(trace_running_fallback.steps[1].tool_name, "list_open_windows")
+        self.assertEqual(self.process_tool.call_count, 1)
+        self.assertEqual(self.windows_tool.call_count, 1)
+        self.assertEqual(
+            trace_running_fallback.final_response,
+            'Yes, Notepad is running with a visible window: "notes.txt - Notepad".',
+        )
+
+    def test_list_processes_tool_parameter_compatibility(self):
+        """
+        Verify ListProcessesTool backwards compatibility and all_processes argument handling.
+        """
+        from exocortex.tools.windows.processes import ListProcessesTool
+
+        tool = ListProcessesTool()
+        schema = tool.get_schema()
+        props = schema["parameters"]["properties"]
+        self.assertIn("all_processes", props)
+        self.assertEqual(props["all_processes"]["type"], "boolean")
+
+        valid, err = tool.validate_arguments({"all_processes": True})
+        self.assertTrue(valid, msg=err)
+
+        valid, err = tool.validate_arguments({})
+        self.assertTrue(valid, msg=err)
+
 
 
 if __name__ == "__main__":

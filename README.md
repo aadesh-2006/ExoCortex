@@ -4,7 +4,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Windows%2010-blue.svg)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/Tests-259%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-264%20Passed-brightgreen.svg)]()
 
 ExoCortex is a hardware-agnostic, local-first AI agent for Windows that interprets natural-language requests, reasons through tasks, and executes them using permission-controlled desktop tools.
 
@@ -115,10 +115,26 @@ The execution engine supports a three-tier permission model:
 To deliver responsive user experiences on local hardware, ExoCortex integrates two complementary execution optimizations:
 
 ### 1. Deterministic Fast Path (`FastPathRouter`)
-High-frequency canonical requests bypass model deliberation entirely:
-- **Scope**: Canonical zero-argument queries for window enumeration, process listing, system diagnostics, and health checks.
-- **Matching**: Exact normalized dictionary matching (case-folded, whitespace-collapsed, punctuation-stripped). No fuzzy matching, parameter extraction, or mutation bypass.
-- **Latency**: Sub-millisecond dispatch (<1 ms) with **0 LLM calls**.
+High-frequency deterministic desktop requests bypass model deliberation entirely, executing with **0 LLM calls**:
+
+- **Canonical Zero-Argument Routing**:
+  - **Scope**: Canonical queries for window enumeration (`list open windows`), process listing (`list running processes`), system diagnostics (`system info`), and component health (`health check`).
+  - **Matching**: Exact normalized dictionary matching (case-folded, whitespace-collapsed, punctuation-stripped).
+  - **Latency**: Sub-millisecond dispatch (**<1 ms**).
+
+- **Parameterized Application-State Routing**:
+  - **Scope**: Targeted natural-language inquiries checking application state (`is <app> open?`, `is <app> running?`, `is <app> active?`, `check if <app> is running`, `do I have <app> open?`).
+  - **Supported Applications**: Curated, verified Windows applications: `Notepad`, `Google Chrome`, `Mozilla Firefox`, `Spotify`, `Visual Studio Code` (`VS Code`), and `Windows Terminal`. Unrecognized or ambiguous aliases (`browser`, `terminal`, `editor`) safely fall through to general model deliberation.
+  - **Identity-First Security & Correctness**: Process identity strictly takes precedence. Window titles never override a known mismatching process name (e.g. Notepad displaying `chrome_flags.txt` is never identified as Chrome). Title fallback is strictly restricted to cases where the process name is genuinely unavailable (`unknown`) using tightened, application-specific patterns.
+  - **Semantic State Distinctions**:
+    - **Active Foreground**: A matching top-level window is verified as holding the active Win32 keyboard foreground focus.
+    - **Open with Visible Window**: One or more visible top-level windows matching the application exist on the desktop.
+    - **Running in Background**: One or more OS processes exist, but no visible top-level window was found.
+    - **Not Running**: Conclusively verified absent across both process enumeration and desktop windows.
+  - **Intent-Specific Short-Circuiting & Latency**:
+    - Queries for `open` or `active` inspect desktop windows first: if a matching visible window is confirmed, the router short-circuits and answers immediately (**~1–5 ms**).
+    - Queries for `running` inspect OS processes first: if a matching process is confirmed, it answers immediately without unnecessary window enumeration.
+    - Confirming absence ("not running") or background status requires complete process and window enumeration; latency scales with host process count (**~0.8–2.5 s** over 350+ system processes), providing a deterministic factual answer while saving 100% of LLM inference latency (~90–180s on CPU).
 
 ### 2. Direct Observation Completion
 When a user prompt resolves to a single read-only desktop observation (such as `list_open_windows`, `list_processes`, or `inspect_window_ui_elements`), the observation output is returned directly to the user:
@@ -234,6 +250,11 @@ py -m exocortex.cli tools
 ```powershell
 # Fast-path canonical request (executes in <1 ms with 0 LLM calls)
 py -m exocortex.cli run --prompt "list open windows"
+
+# Fast-path application-state inquiries (identity-first, 0 LLM calls)
+py -m exocortex.cli run --prompt "Is Chrome open?"
+py -m exocortex.cli run --prompt "Is Notepad running?"
+py -m exocortex.cli run --prompt "Is VS Code active?"
 
 # Parameterized desktop inspection
 py -m exocortex.cli run --prompt "Check which windows are open and inspect their UI elements"
