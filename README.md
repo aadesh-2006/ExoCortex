@@ -4,8 +4,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%20Windows%2010-blue.svg)](https://microsoft.com/windows)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-244%20Passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-246%20Passed-brightgreen.svg)]()
 
 ExoCortex is a hardware-agnostic, local-first AI agent for Windows that interprets natural-language requests, reasons through tasks, and executes them using permission-controlled desktop tools.
 
@@ -69,15 +68,25 @@ flowchart TD
 
 ---
 
-## Tool Registry & Security Boundaries
+## Tool Registry & Security Safeguards
 
-ExoCortex never executes arbitrary shell commands or unvalidated scripts. Every capability is exposed as a typed `BaseTool` governed by one of three permission levels:
+ExoCortex never executes arbitrary shell commands or unvalidated scripts. Every capability is exposed as a typed `BaseTool` registered in `ToolRegistry` and executed with strict bounds.
 
-| Permission Level | Enforcement Policy | Registered Tools |
+### Security Architecture & Permission Framework
+The execution engine supports a three-tier permission model:
+- **`SAFE`**: Automatically executed without prompting. Currently, **all 13 registered built-in tools are declared as `SAFE`**, backed by strict programmatic safeguards:
+  - **Allowlisted Application Execution**: `launch_application` only launches known, non-destructive tools (`notepad`, `calc`, `mspaint`, `explorer`). Arbitrary paths or binaries are strictly blocked.
+  - **Scheme-Validated URL Launching**: `open_url` strictly requires `http://` or `https://`. File schemes (`file://`), script injection (`javascript:`), and payload URIs (`data:`) are rejected.
+  - **Sandboxed Workspace Filesystem**: `list_directory`, `read_text_file`, and `create_directory` are strictly confined inside `~/.exocortex/workspace`. Path traversal (`..`) outside the workspace root is rejected with a security violation.
+  - **Read-Only Inspection**: Windows desktop windows (`list_open_windows`), UI elements (`inspect_window_ui_elements`), and running processes (`list_processes`) are non-mutating and strictly read-only.
+- **`CONFIRMATION_REQUIRED`**: Architectural framework support for state-modifying actions requiring explicit user callback approval before execution.
+- **`RESTRICTED`**: High-risk actions (arbitrary shell commands, registry modifications, destructive deletion) blocked by default.
+
+| Permission Level | Enforcement Policy | Current Tool Implementation |
 |---|---|---|
-| **`SAFE`** | Read-only inspection; executes immediately without prompting. | `list_open_windows`, `inspect_window_ui_elements`, `list_processes`, `system_info`, `health_check`, `echo`, `list_directory`, `read_text_file`, `web_search`, `fetch_web_page` |
-| **`CONFIRMATION_REQUIRED`** | Modifies state, launches processes, or accesses external URLs; requires user confirmation callback. | `launch_application` (allowlisted apps), `open_url` (scheme-validated HTTP/HTTPS), `create_directory` |
-| **`RESTRICTED`** | Destructive actions, system configurations, or arbitrary execution; blocked by default. | *Prohibited in ExoCortex core architecture.* |
+| **`SAFE`** | Read-only or allowlisted/sandboxed execution without user prompt. | All 13 tools: `list_open_windows`, `inspect_window_ui_elements`, `list_processes`, `system_info`, `health_check`, `echo`, `list_directory`, `read_text_file`, `create_directory`, `launch_application`, `open_url`, `web_search`, `fetch_web_page` |
+| **`CONFIRMATION_REQUIRED`** | Pauses execution and awaits user callback confirmation. | Supported by `ToolRegistry` & `AgentExecutor` pipeline for future modifying extensions. |
+| **`RESTRICTED`** | Arbitrary execution or high-risk mutation. | Strictly prohibited. |
 
 ### Built-in Tool Suite
 
@@ -206,37 +215,40 @@ EXOCORTEX_DIRECT_OBSERVATION_COMPLETION=true
 
 ## Usage & CLI Reference
 
+> [!TIP]
+> On Windows, invoke commands using the Python launcher `py -m ...`. If you have activated your virtual environment (`.\.venv\Scripts\Activate.ps1`), `python -m ...` may also be used.
+
 ### System Status & Health Probes
 ```powershell
 # Inspect overall system health, SLM connectivity, and registered tools
-python -m exocortex.cli status
+py -m exocortex.cli status
 
 # Inspect hardware architecture, available execution providers, and memory
-python -m exocortex.cli hardware
+py -m exocortex.cli hardware
 
 # List all registered tools and their security permission levels
-python -m exocortex.cli tools
+py -m exocortex.cli tools
 ```
 
 ### Running Interactive Desktop Tasks
 ```powershell
 # Fast-path canonical request (executes in <1 ms with 0 LLM calls)
-python -m exocortex.cli run --prompt "list open windows"
+py -m exocortex.cli run --prompt "list open windows"
 
 # Parameterized desktop inspection
-python -m exocortex.cli run --prompt "Check which windows are open and inspect their UI elements"
+py -m exocortex.cli run --prompt "Check which windows are open and inspect their UI elements"
 
 # Inspect files in the sandboxed workspace
-python -m exocortex.cli run --prompt "List the files in my workspace"
+py -m exocortex.cli run --prompt "List the files in my workspace"
 
 # Run with full structured execution trace
-python -m exocortex.cli run --prompt "What processes are currently running?" --trace
+py -m exocortex.cli run --prompt "What processes are currently running?" --trace
 ```
 
 ### Local Inference Benchmarking
 ```powershell
 # Run the built-in local inference benchmark suite
-python -m exocortex.cli benchmark
+py -m exocortex.cli benchmark
 ```
 
 ---
@@ -255,9 +267,3 @@ py -m pytest tests/test_fast_path.py tests/test_direct_completion.py -v
 # Run with coverage report
 py -m pytest --cov=exocortex tests/
 ```
-
----
-
-## License
-
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

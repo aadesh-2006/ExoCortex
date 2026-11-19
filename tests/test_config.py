@@ -47,6 +47,33 @@ class TestConfig(unittest.TestCase):
         # Clean up
         d.rmdir()
 
+    def test_valid_hardware_targets_and_env(self):
+        # Default is auto
+        s_default = Settings()
+        self.assertEqual(s_default.hardware_target, "auto")
+
+        # Explicit initialization with valid targets
+        for target in ("auto", "dml", "cpu"):
+            with self.subTest(target=target):
+                s = Settings(hardware_target=target)
+                self.assertEqual(s.hardware_target, target)
+
+        # Environment variable override
+        with unittest.mock.patch.dict(os.environ, {"EXOCORTEX_HARDWARE_TARGET": "dml"}):
+            s_env = Settings()
+            self.assertEqual(s_env.hardware_target, "dml")
+            self.assertEqual(s_env.execution_provider, "dml")
+
+    def test_invalid_hardware_target_resolution_fallback(self):
+        from exocortex.runtime.provider import RuntimeDispatcher
+        # Unknown/obsolete targets fall back to CPUExecutionProvider with warning reason
+        for bad_target in ("invalid", "qnn", "cuda", "xyz"):
+            with self.subTest(bad_target=bad_target):
+                ep, reason = RuntimeDispatcher.resolve_provider(bad_target)
+                self.assertEqual(ep, "CPUExecutionProvider")
+                self.assertIsNotNone(reason)
+                self.assertIn("Unknown execution provider target", reason)
+
     def test_get_config_singleton(self):
         cfg1 = get_config(reload=True)
         cfg2 = get_config()

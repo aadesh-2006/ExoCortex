@@ -112,6 +112,43 @@ class TestLocalServerSLMProvider(unittest.TestCase):
         self.assertEqual(info["max_tokens"], 1024)
         self.assertTrue(info["is_local"])
 
+    @patch("urllib.request.urlopen")
+    def test_local_server_independence_from_onnxruntime(self, mock_urlopen):
+        """
+        Verify that LocalServerSLMProvider initializes and executes chat/generate logic
+        completely independent of ONNX Runtime, functioning cleanly even if onnxruntime is absent.
+        """
+        with patch.dict("sys.modules", {"onnxruntime": None}):
+            provider = LocalServerSLMProvider(
+                base_url="http://localhost:11434/v1",
+                model_name="qwen3:4b",
+                timeout=15.0,
+            )
+            # Verify availability check
+            mock_models_resp = MagicMock()
+            mock_models_resp.status = 200
+            mock_models_resp.__enter__.return_value = mock_models_resp
+            mock_urlopen.return_value = mock_models_resp
+            self.assertTrue(provider.is_available())
+
+            # Verify generate call
+            mock_chat_resp = MagicMock()
+            mock_chat_resp.read.return_value = json.dumps({
+                "choices": [{
+                    "message": {"content": "{\"intent\": \"chat\", \"direct_response\": \"Independent Ollama response\"}"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 18}
+            }).encode("utf-8")
+            mock_chat_resp.__enter__.return_value = mock_chat_resp
+            mock_urlopen.return_value = mock_chat_resp
+
+            res = provider.generate("Test prompt without ONNX")
+            self.assertIsInstance(res, SLMResponse)
+            self.assertIn("Independent Ollama response", res.content)
+            self.assertEqual(res.model_name, "qwen3:4b")
+            self.assertEqual(res.provider_name, "LocalServerSLMProvider")
+
     def test_init_rejects_non_positive_or_invalid_timeout(self):
         invalid_timeouts = [0, -1, -50.0, "abc", ""]
         for t in invalid_timeouts:

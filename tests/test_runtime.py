@@ -119,6 +119,57 @@ class TestONNXEngineFallback(unittest.TestCase):
             self.assertEqual(generator.active_provider, "CPUExecutionProvider")
             self.assertFalse(generator.is_accelerated)
 
+    @patch("onnxruntime.InferenceSession")
+    @patch("tokenizers.Tokenizer.from_file")
+    def test_directml_active_selection_and_acceleration(self, mock_tok, mock_sess):
+        """
+        Verify that when DirectML provider is available and initializes successfully,
+        the ONNX engine selects it as active provider and reports is_accelerated=True.
+        """
+        mock_dml_session = MagicMock()
+        mock_dml_session.get_providers.return_value = ["DmlExecutionProvider", "CPUExecutionProvider"]
+        mock_sess.return_value = mock_dml_session
+
+        from exocortex.slm.onnx_engine import ONNXNeuralGenerator
+
+        with patch.object(Path, "exists", return_value=True):
+            generator = ONNXNeuralGenerator(
+                model_path=Path("dummy/model.onnx"),
+                tokenizer_path=Path("dummy/tokenizer.json"),
+                execution_provider="dml",
+            )
+            self.assertEqual(generator.selected_provider, "DmlExecutionProvider")
+            self.assertEqual(generator.active_provider, "DmlExecutionProvider")
+            self.assertTrue(generator.is_accelerated)
+            self.assertFalse(generator.fallback_occurred)
+            self.assertIsNone(generator.fallback_reason)
+
+    @patch("onnxruntime.InferenceSession")
+    @patch("tokenizers.Tokenizer.from_file")
+    def test_directml_silent_downgrade_triggers_fallback(self, mock_tok, mock_sess):
+        """
+        Simulate DirectML being requested, but ONNX Runtime returning CPUExecutionProvider
+        as the active provider without raising an exception.
+        Verify fallback_occurred is True and fallback_reason records the silent downgrade.
+        """
+        mock_silent_cpu_session = MagicMock()
+        mock_silent_cpu_session.get_providers.return_value = ["CPUExecutionProvider"]
+        mock_sess.return_value = mock_silent_cpu_session
+
+        from exocortex.slm.onnx_engine import ONNXNeuralGenerator
+
+        with patch.object(Path, "exists", return_value=True):
+            generator = ONNXNeuralGenerator(
+                model_path=Path("dummy/model.onnx"),
+                tokenizer_path=Path("dummy/tokenizer.json"),
+                execution_provider="dml",
+            )
+            self.assertEqual(generator.selected_provider, "DmlExecutionProvider")
+            self.assertEqual(generator.active_provider, "CPUExecutionProvider")
+            self.assertTrue(generator.fallback_occurred)
+            self.assertIn("DmlExecutionProvider was not active", generator.fallback_reason)
+            self.assertFalse(generator.is_accelerated)
+
 
 class TestBenchmarkingLabels(unittest.TestCase):
     """Test benchmark classification and metrics reporting."""
