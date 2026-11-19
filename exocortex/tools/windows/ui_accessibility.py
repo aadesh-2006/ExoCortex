@@ -12,7 +12,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from exocortex.tools.base import (
     BaseTool,
@@ -36,6 +37,7 @@ MAX_PROP_STRING_CHARS = 80
 MAX_TEXT_OUTPUT_CHARS = 4000
 
 # COM Concurrency Constants
+COINIT_MULTITHREADED = 0x0
 COINIT_APARTMENTTHREADED = 0x2
 RPC_E_CHANGED_MODE = 0x80010106
 S_OK = 0
@@ -44,7 +46,22 @@ CLSCTX_INPROC_SERVER = 0x1
 
 # COM GUIDs
 CLSID_CUIAutomation_STR = "{ff48dba4-60ef-4201-aa87-54103eef594e}"
+CLSID_CUIAutomation8_STR = "{e22ad333-b25f-460c-83d0-0581107395c9}"
 IID_IUIAutomation_STR = "{30cbe57d-d9d0-452a-ab13-7ac5ac4825ee}"
+IID_IUIAutomation2_STR = "{34723aff-0c9d-49d0-9896-7ab52df8cd8a}"
+
+# UIA Timeout Defaults (milliseconds)
+# Note: Connection timeout specifies max time to establish initial connection to a provider.
+# Transaction timeout specifies max time for an individual cross-process provider transaction.
+# These timeouts prevent indefinite hangs on unresponsive UI threads, but do NOT impose
+# a cumulative deadline on the entire multi-element traversal (bounded by max_depth and max_elements).
+DEFAULT_UIA_CONNECTION_TIMEOUT_MS = 2000
+DEFAULT_UIA_TRANSACTION_TIMEOUT_MS = 2000
+
+
+class UIAUnsupportedPlatformError(RuntimeError):
+    """Raised when native UI Automation timeout protection (CUIAutomation8 / IUIAutomation2) is unavailable."""
+    pass
 
 
 class GUID(ctypes.Structure):
@@ -105,8 +122,13 @@ CONTROL_TYPE_NAMES: Dict[int, str] = {
 
 
 def _safe_release(ptr: Optional[ctypes.c_void_p]) -> None:
-    """Safely invoke IUnknown::Release on a COM interface pointer."""
-    if not ptr or not ptr.value:
+    """
+    Safely invoke IUnknown::Release on a COM interface pointer.
+
+    Defensively nulls out the pointer after release to ensure idempotence
+    and prevent accidental double-free on the same c_void_p reference.
+    """
+    if ptr is None or not getattr(ptr, "value", None):
         return
     try:
         vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
@@ -114,6 +136,11 @@ def _safe_release(ptr: Optional[ctypes.c_void_p]) -> None:
         fn_release(ptr)
     except Exception as err:
         logger.debug("Error releasing COM pointer %s: %s", ptr, err)
+    finally:
+        try:
+            ptr.value = None
+        except Exception:
+            pass
 
 
 def _read_and_free_bstr(bstr_val: Optional[int]) -> str:
@@ -222,13 +249,43 @@ def resolve_target_window(
 
 
 class COMSession:
-    """Manages thread COM apartment initialization and desktop accessibility."""
+    """
+    Manages dedicated worker thread COM apartment initialization (MTA) and desktop access.
+
+    COM Threading Model:
+    - Microsoft UI Automation client components specify the Multithreaded Apartment
+      (MTA, COINIT_MULTITHREADED) model on a dedicated worker thread for proper cross-process
+      call synchronization without window message loop deadlocks.
+    - S_OK (0): New MTA apartment initialized on this worker thread. Owned by session.
+    - S_FALSE (1): MTA apartment was already initialized on this worker thread. Reference
+      count incremented; balanced with CoUninitialize.
+    - RPC_E_CHANGED_MODE (0x80010106): The thread was unexpectedly already initialized
+      in a non-MTA concurrency model; treated as a fatal initialization error.
+    - Any other HRESULT: Fatal COM error; aborts initialization and restores desktop.
+    """
 
     def __init__(self) -> None:
         self.should_uninitialize: bool = False
         self._switched_desktop: bool = False
         self._h_desk: Optional[int] = None
         self._orig_desk: Optional[int] = None
+
+    def _cleanup_desktop(self) -> None:
+        if self._switched_desktop:
+            user32 = ctypes.windll.user32
+            if self._orig_desk:
+                try:
+                    user32.SetThreadDesktop(self._orig_desk)
+                except Exception as e:
+                    logger.debug("Failed to restore original thread desktop: %s", e)
+            if self._h_desk:
+                try:
+                    user32.CloseDesktop(self._h_desk)
+                except Exception as e:
+                    logger.debug("Failed to close desktop handle: %s", e)
+            self._switched_desktop = False
+            self._h_desk = None
+            self._orig_desk = None
 
     def __enter__(self) -> COMSession:
         _configure_win32_signatures()
@@ -254,7 +311,7 @@ class COMSession:
         user32.CloseDesktop.restype = wintypes.BOOL
         user32.CloseDesktop.argtypes = [wintypes.HDESK]
 
-        # Check if the thread is already on the interactive Default desktop
+        # 1. Desktop switching on fresh worker thread before COM or window creation
         UOI_NAME = 2
         try:
             tid = kernel32.GetCurrentThreadId()
@@ -266,71 +323,50 @@ class COMSession:
             else:
                 current_desk_name = ""
 
-            if current_desk_name != "default":
+            if current_desk_name and current_desk_name != "default":
                 # Background runner or service desktop: safely switch to interactive Default desktop
                 h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
-                if h_desk:
-                    if user32.SetThreadDesktop(h_desk):
-                        self._switched_desktop = True
-                        self._h_desk = h_desk
-                    else:
-                        # Could not switch desktop (e.g. thread already has windows or hooks)
-                        user32.CloseDesktop(h_desk)
+                if not h_desk:
+                    raise RuntimeError("Failed to open 'Default' desktop for UI Automation inspection.")
+                if not user32.SetThreadDesktop(h_desk):
+                    user32.CloseDesktop(h_desk)
+                    raise RuntimeError("Failed to set worker thread desktop to 'Default'.")
+                self._switched_desktop = True
+                self._h_desk = h_desk
         except Exception as e:
-            logger.debug("Desktop inspection/switching skipped or failed: %s", e)
+            self._cleanup_desktop()
+            raise RuntimeError(f"Desktop inspection or switching failed: {e}") from e
 
+        # 2. Explicitly initialize COM in MTA mode
         ole32 = ctypes.windll.ole32
         ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
         ole32.CoInitializeEx.restype = ctypes.c_long
 
-        hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+        hr = ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
         hr_u = hr & 0xFFFFFFFF
 
         if hr in (S_OK, S_FALSE):
             self.should_uninitialize = True
         elif hr_u == RPC_E_CHANGED_MODE:
-            # Thread is already in MTA mode; do NOT call CoUninitialize
-            self.should_uninitialize = False
+            self._cleanup_desktop()
+            raise RuntimeError(
+                "Worker thread unexpectedly initialized with non-MTA COM apartment (RPC_E_CHANGED_MODE)."
+            )
         else:
-            # If CoInitializeEx failed and we switched desktop, restore original desktop immediately
-            if self._switched_desktop and self._orig_desk:
-                try:
-                    user32.SetThreadDesktop(self._orig_desk)
-                except Exception:
-                    pass
-                if self._h_desk:
-                    try:
-                        user32.CloseDesktop(self._h_desk)
-                    except Exception:
-                        pass
-                self._switched_desktop = False
+            self._cleanup_desktop()
             raise RuntimeError(f"CoInitializeEx failed with HRESULT 0x{hr_u:08X}")
 
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        user32 = ctypes.windll.user32
-
-        # 1. Uninitialize COM first while still in the apartment
         if self.should_uninitialize:
             try:
                 ctypes.windll.ole32.CoUninitialize()
             except Exception as e:
                 logger.debug("CoUninitialize error: %s", e)
+            self.should_uninitialize = False
 
-        # 2. Restore original thread desktop and close opened desktop handle
-        if self._switched_desktop:
-            if self._orig_desk:
-                try:
-                    user32.SetThreadDesktop(self._orig_desk)
-                except Exception as e:
-                    logger.debug("Failed to restore original thread desktop: %s", e)
-            if self._h_desk:
-                try:
-                    user32.CloseDesktop(self._h_desk)
-                except Exception as e:
-                    logger.debug("Failed to close desktop handle: %s", e)
-            self._switched_desktop = False
+        self._cleanup_desktop()
 
 
 
@@ -462,30 +498,105 @@ class InspectWindowUIElementsTool(BaseTool):
             "is_offscreen": is_offscreen,
         }
 
+    def _execute_in_worker_thread(
+        self,
+        task: Callable[[], Tuple[List[Dict[str, Any]], Dict[str, Any]]],
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Execute the UI Automation inspection in a dedicated worker thread with an MTA COM apartment.
+
+        Keeps the calling thread's COM apartment completely unmutated.
+        """
+        result: List[Any] = []
+        exception: List[BaseException] = []
+
+        def worker() -> None:
+            try:
+                res = task()
+                result.append(res)
+            except BaseException as ex:
+                exception.append(ex)
+
+        t = threading.Thread(target=worker, name="ExoCortex-UIA-Worker")
+        t.start()
+        t.join()
+
+        if exception:
+            raise exception[0]
+        if not result:
+            raise RuntimeError("UI Automation worker thread terminated without returning a result.")
+        return result[0]
+
     def _traverse_control_tree(
         self,
         hwnd: int,
         max_depth: int,
         max_elements: int,
-    ) -> List[Dict[str, Any]]:
-        """Perform bounded Control View traversal of the target window element tree."""
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Perform bounded Control View traversal of the target window element tree.
+
+        Requires native timeout protection via CUIAutomation8 / IUIAutomation2.
+        Fails closed with UIAUnsupportedPlatformError if timeout protection is unavailable.
+
+        Returns:
+            Tuple of (collected_elements, timeout_metadata)
+        """
         ole32 = ctypes.windll.ole32
 
-        clsid_auto = GUID()
-        iid_auto = GUID()
-        ole32.CLSIDFromString(CLSID_CUIAutomation_STR, ctypes.byref(clsid_auto))
-        ole32.IIDFromString(IID_IUIAutomation_STR, ctypes.byref(iid_auto))
-
         p_auto = ctypes.c_void_p()
+
+        # 1. Require CUIAutomation8 with IUIAutomation2 (Windows 8+) to configure genuine timeouts
+        clsid_auto8 = GUID()
+        iid_auto2 = GUID()
+        ole32.CLSIDFromString(CLSID_CUIAutomation8_STR, ctypes.byref(clsid_auto8))
+        ole32.IIDFromString(IID_IUIAutomation2_STR, ctypes.byref(iid_auto2))
+
         hr = ole32.CoCreateInstance(
-            ctypes.byref(clsid_auto),
+            ctypes.byref(clsid_auto8),
             None,
             CLSCTX_INPROC_SERVER,
-            ctypes.byref(iid_auto),
+            ctypes.byref(iid_auto2),
             ctypes.byref(p_auto),
         )
+
         if hr != 0 or not p_auto.value:
-            raise RuntimeError(f"Failed to create CUIAutomation instance: HRESULT 0x{hr & 0xFFFFFFFF:08X}")
+            raise UIAUnsupportedPlatformError(
+                f"Timeout-protected UI Automation is unavailable: CoCreateInstance(CUIAutomation8, IUIAutomation2) "
+                f"failed with HRESULT 0x{hr & 0xFFFFFFFF:08X}. Legacy unprotected fallback is disabled for safety."
+            )
+
+        try:
+            vtbl_auto2 = ctypes.cast(p_auto, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            fn_put_conn_timeout = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, wintypes.DWORD
+            )(vtbl_auto2[61])
+            fn_put_tran_timeout = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, wintypes.DWORD
+            )(vtbl_auto2[63])
+
+            hr_c = fn_put_conn_timeout(p_auto, DEFAULT_UIA_CONNECTION_TIMEOUT_MS)
+            hr_t = fn_put_tran_timeout(p_auto, DEFAULT_UIA_TRANSACTION_TIMEOUT_MS)
+
+            if hr_c != 0 or hr_t != 0:
+                raise UIAUnsupportedPlatformError(
+                    f"Failed to configure UI Automation timeouts: put_ConnectionTimeout returned "
+                    f"0x{hr_c & 0xFFFFFFFF:08X}, put_TransactionTimeout returned 0x{hr_t & 0xFFFFFFFF:08X}."
+                )
+        except UIAUnsupportedPlatformError:
+            _safe_release(p_auto)
+            raise
+        except Exception as e:
+            _safe_release(p_auto)
+            raise UIAUnsupportedPlatformError(
+                f"Failed invoking UI Automation timeout setters: {e}"
+            ) from e
+
+        timeout_meta: Dict[str, Any] = {
+            "timeout_configured": True,
+            "connection_timeout_ms": DEFAULT_UIA_CONNECTION_TIMEOUT_MS,
+            "transaction_timeout_ms": DEFAULT_UIA_TRANSACTION_TIMEOUT_MS,
+        }
 
         root_elem = ctypes.c_void_p()
         walker = ctypes.c_void_p()
@@ -501,12 +612,18 @@ class InspectWindowUIElementsTool(BaseTool):
 
             hr_root = fn_elem_from_handle(p_auto, hwnd, ctypes.byref(root_elem))
             if hr_root != 0 or not root_elem.value:
+                if root_elem.value:
+                    _safe_release(root_elem)
+                    root_elem = ctypes.c_void_p()
                 raise RuntimeError(
                     f"ElementFromHandle failed for HWND 0x{hwnd:X}: HRESULT 0x{hr_root & 0xFFFFFFFF:08X}"
                 )
 
             hr_w = fn_get_walker(p_auto, ctypes.byref(walker))
             if hr_w != 0 or not walker.value:
+                if walker.value:
+                    _safe_release(walker)
+                    walker = ctypes.c_void_p()
                 raise RuntimeError(
                     f"get_ControlViewWalker failed: HRESULT 0x{hr_w & 0xFFFFFFFF:08X}"
                 )
@@ -525,8 +642,12 @@ class InspectWindowUIElementsTool(BaseTool):
                 if len(collected) >= max_elements:
                     return
 
-                elem_data = self._extract_element_data(current, depth)
-                collected.append(elem_data)
+                try:
+                    elem_data = self._extract_element_data(current, depth)
+                    collected.append(elem_data)
+                except Exception as err:
+                    logger.debug("Failed extracting element data at depth %d: %s", depth, err)
+                    return
 
                 if depth >= max_depth or len(collected) >= max_elements:
                     return
@@ -534,25 +655,39 @@ class InspectWindowUIElementsTool(BaseTool):
                 first_child = ctypes.c_void_p()
                 hr_fc = fn_get_first_child(walker, current, ctypes.byref(first_child))
                 if hr_fc != 0 or not first_child.value:
+                    if first_child.value:
+                        _safe_release(first_child)
                     return
 
                 curr_child = first_child
-                while curr_child.value:
-                    if len(collected) >= max_elements:
-                        _safe_release(curr_child)
-                        break
+                try:
+                    while curr_child.value:
+                        if len(collected) >= max_elements:
+                            break
 
-                    traverse_recursive(curr_child, depth + 1)
-
-                    next_sib = ctypes.c_void_p()
-                    hr_sib = fn_get_next_sibling(walker, curr_child, ctypes.byref(next_sib))
+                        next_sib = ctypes.c_void_p()
+                        try:
+                            traverse_recursive(curr_child, depth + 1)
+                            if len(collected) < max_elements:
+                                hr_sib = fn_get_next_sibling(
+                                    walker, curr_child, ctypes.byref(next_sib)
+                                )
+                                if hr_sib != 0:
+                                    if next_sib.value:
+                                        _safe_release(next_sib)
+                                    next_sib = ctypes.c_void_p()
+                        except Exception:
+                            if next_sib.value:
+                                _safe_release(next_sib)
+                            raise
+                        finally:
+                            _safe_release(curr_child)
+                            curr_child = next_sib
+                finally:
                     _safe_release(curr_child)
-                    if hr_sib != 0 or not next_sib.value:
-                        break
-                    curr_child = next_sib
 
             traverse_recursive(root_elem, 0)
-            return collected
+            return collected, timeout_meta
 
         finally:
             _safe_release(root_elem)
@@ -600,14 +735,34 @@ class InspectWindowUIElementsTool(BaseTool):
                 data={"status": "invalid_handle"},
             )
 
-        # 2. Execute bounded inspection in safe COM apartment session
-        try:
+        # 2. Execute bounded inspection in dedicated MTA worker thread
+        def worker_task() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             with COMSession():
-                elements = self._traverse_control_tree(
+                return self._traverse_control_tree(
                     hwnd=hwnd,
                     max_depth=max_depth,
                     max_elements=max_elements,
                 )
+
+        try:
+            traversal_res = self._execute_in_worker_thread(worker_task)
+            if isinstance(traversal_res, tuple):
+                elements, timeout_meta = traversal_res
+            else:
+                elements = traversal_res
+                timeout_meta = {
+                    "timeout_configured": False,
+                    "connection_timeout_ms": None,
+                    "transaction_timeout_ms": None,
+                }
+        except UIAUnsupportedPlatformError as e:
+            logger.warning("UI Automation timeout protection unavailable: %s", e)
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Timeout-protected UI Automation is unavailable on this platform: {e}",
+                data={"status": "unsupported_platform"},
+            )
         except Exception as e:
             logger.error("UI Automation inspection failed: %s", e)
             return ToolResult(
@@ -627,6 +782,9 @@ class InspectWindowUIElementsTool(BaseTool):
                         "title": matched_win.get("title"),
                         "process_name": matched_win.get("process_name"),
                     },
+                    "timeout_configured": timeout_meta.get("timeout_configured", False),
+                    "connection_timeout_ms": timeout_meta.get("connection_timeout_ms"),
+                    "transaction_timeout_ms": timeout_meta.get("transaction_timeout_ms"),
                     "total_elements": 0,
                     "elements": [],
                 },
@@ -670,6 +828,9 @@ class InspectWindowUIElementsTool(BaseTool):
                     "title": matched_win.get("title"),
                     "process_name": matched_win.get("process_name"),
                 },
+                "timeout_configured": timeout_meta.get("timeout_configured", False),
+                "connection_timeout_ms": timeout_meta.get("connection_timeout_ms"),
+                "transaction_timeout_ms": timeout_meta.get("transaction_timeout_ms"),
                 "total_elements": len(elements),
                 "elements": elements,
             },
