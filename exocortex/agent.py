@@ -138,7 +138,9 @@ class ExoCortexAgent:
         final_resp = trace.final_response or trace.error_message or "Task completed."
         self.history.append(SLMMessage(role="assistant", content=final_resp))
 
-        is_success = (trace.status == ExecutionStatus.COMPLETED)
+        # Check honest completion semantics: if any executed tool failed, the run was not successful
+        has_failed_tools = any(not t.get("success", False) for t in executed_tools_record)
+        is_success = (trace.status == ExecutionStatus.COMPLETED) and not has_failed_tools
 
         # Construct legacy plan object for backward compatibility
         plan_steps = [
@@ -155,6 +157,11 @@ class ExoCortexAgent:
         ]
         plan = ExecutionPlan(goal=user_prompt, steps=plan_steps, is_complete=is_success)
 
+        validation_err = trace.error_message
+        if not is_success and not validation_err and has_failed_tools:
+            failed_tool_names = [t["tool"] for t in executed_tools_record if not t.get("success", False)]
+            validation_err = f"One or more tool steps failed: {', '.join(failed_tool_names)}"
+
         return AgentRunResult(
             prompt=user_prompt,
             response_text=final_resp,
@@ -164,6 +171,6 @@ class ExoCortexAgent:
             executed_tools=executed_tools_record,
             total_latency_ms=trace.total_duration_ms,
             slm_info=trace.slm_info if (trace and trace.slm_info) else self.slm_provider.get_model_info(),
-            validation_error=trace.error_message if not is_success else None,
+            validation_error=validation_err,
             trace=trace,
         )

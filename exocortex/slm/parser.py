@@ -140,10 +140,6 @@ def parse_and_validate_decision(
     if isinstance(raw_steps, list):
         decision.planned_steps_count = len(raw_steps)
 
-    # Limit to 1 tool step per reasoning iteration
-    if len(decision.steps) > 1:
-        decision.steps = decision.steps[:1]
-
     # Validate tool steps against ToolRegistry
     for step in decision.steps:
         tool = tool_registry.get_tool(step.tool)

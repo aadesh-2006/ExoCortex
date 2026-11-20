@@ -135,6 +135,38 @@ Done."""
         self.assertIsNone(decision)
         self.assertIn("Unknown tool requested: 'simple.wikipedia.org/wiki/Pune'", err)
 
+    def test_reject_batch_with_unknown_secondary_tool(self):
+        """Verify that if Step 1 is valid but Step 2 is unknown, the entire decision is rejected safely."""
+        raw = """{
+  "thought_summary": "Step 1 echo message, then Step 2 unknown tool.",
+  "intent": "general_action",
+  "steps": [
+    {"tool": "echo", "arguments": {"message": "valid step 1"}},
+    {"tool": "completely_unknown_tool_xyz", "arguments": {}}
+  ],
+  "requires_confirmation": false
+}"""
+        decision, err = parse_and_validate_decision(raw, self.registry)
+        self.assertIsNone(decision, "Entire decision must be rejected when any step is unknown")
+        self.assertIsNotNone(err)
+        self.assertIn("Unknown tool requested: 'completely_unknown_tool_xyz'", err)
+
+    def test_reject_batch_with_invalid_arguments_on_secondary_step(self):
+        """Verify that if Step 1 is valid but Step 2 has invalid arguments, the decision is rejected safely."""
+        raw = """{
+  "thought_summary": "Step 1 echo message, then Step 2 echo without message.",
+  "intent": "general_action",
+  "steps": [
+    {"tool": "echo", "arguments": {"message": "valid step 1"}},
+    {"tool": "echo", "arguments": {}}
+  ],
+  "requires_confirmation": false
+}"""
+        decision, err = parse_and_validate_decision(raw, self.registry)
+        self.assertIsNone(decision, "Entire decision must be rejected when any step has invalid arguments")
+        self.assertIsNotNone(err)
+        self.assertIn("Missing required parameter: 'message'", err)
+
 
 if __name__ == "__main__":
     unittest.main()

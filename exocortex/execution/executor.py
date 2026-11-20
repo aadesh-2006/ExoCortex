@@ -14,6 +14,7 @@ Security Guarantees:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,179 @@ DIRECT_COMPLETION_TOOLS = {
     "list_processes",
     "inspect_window_ui_elements",
 }
+
+# Positive recognition sets for unambiguous, unconstrained observation requests.
+# Direct completion is permitted ONLY if the normalized query exactly matches an entry in the tool's canonical set.
+CANONICAL_WINDOW_OBSERVATION_QUERIES: frozenset[str] = frozenset({
+    "list open windows",
+    "list all open windows",
+    "list windows",
+    "list all windows",
+    "list desktop windows",
+    "list all desktop windows",
+    "show open windows",
+    "show all open windows",
+    "show windows",
+    "show all windows",
+    "show desktop windows",
+    "show all desktop windows",
+    "show me open windows",
+    "show me all open windows",
+    "show me windows",
+    "show me all windows",
+    "show me desktop windows",
+    "show me all desktop windows",
+    "show me my desktop windows",
+    "show me my open windows",
+    "show me my windows",
+    "what windows are open",
+    "what windows are currently open",
+    "what desktop windows are open",
+    "what application windows are open",
+    "what windows are active",
+    "display open windows",
+    "display all open windows",
+    "display windows",
+    "display all windows",
+    "display desktop windows",
+    "display all desktop windows",
+    "get open windows",
+    "get all open windows",
+    "get windows",
+    "get all windows",
+    "get open window list",
+    "get window list",
+    "show window list",
+    "list of open windows",
+    "open windows",
+})
+
+CANONICAL_PROCESS_OBSERVATION_QUERIES: frozenset[str] = frozenset({
+    "list processes",
+    "list all processes",
+    "list running processes",
+    "list all running processes",
+    "list active processes",
+    "list all active processes",
+    "show processes",
+    "show all processes",
+    "show running processes",
+    "show all running processes",
+    "show active processes",
+    "show all active processes",
+    "show process list",
+    "show me processes",
+    "show me all processes",
+    "show me running processes",
+    "show me all running processes",
+    "get processes",
+    "get all processes",
+    "get running processes",
+    "get all running processes",
+    "get process list",
+    "what processes are running",
+    "what processes are currently running",
+    "what processes are active",
+    "display processes",
+    "display all processes",
+    "display running processes",
+    "display all running processes",
+    "running processes",
+})
+
+CANONICAL_UI_INSPECTION_QUERIES: frozenset[str] = frozenset({
+    "inspect the ui elements of the active window",
+    "inspect ui elements of the active window",
+    "inspect the ui elements in the active window",
+    "inspect ui elements in the active window",
+    "inspect active window ui elements",
+    "inspect active window controls",
+    "inspect the active window ui elements",
+    "inspect the active window controls",
+    "inspect the active window",
+    "inspect active window",
+    "inspect ui elements",
+    "inspect the ui elements",
+    "inspect window ui elements",
+    "inspect controls in the active window",
+    "inspect controls in active window",
+    "inspect controls in notepad",
+})
+
+CANONICAL_OBSERVATION_QUERIES: Dict[str, frozenset[str]] = {
+    "list_open_windows": CANONICAL_WINDOW_OBSERVATION_QUERIES,
+    "list_processes": CANONICAL_PROCESS_OBSERVATION_QUERIES,
+    "inspect_window_ui_elements": CANONICAL_UI_INSPECTION_QUERIES,
+}
+
+
+def normalize_observation_query(query: str) -> str:
+    """
+    Normalize user goal for deterministic positive canonical observation matching.
+    Case-folds, strips surrounding quotes and trailing/leading punctuation,
+    collapses whitespace, and strips optional polite prefixes/suffixes.
+    """
+    if not query:
+        return ""
+    q = query.strip().lower()
+    q = re.sub(r"^[\s\"'`]+|[\s\"'`?!.,;:]+$", "", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    q = re.sub(r"^(please\s+|can you\s+|could you\s+)", "", q).strip()
+    q = re.sub(r"(\s+please)$", "", q).strip()
+    return q
+
+
+def is_simple_observation_request(
+    user_goal: str,
+    tool_name: str,
+    intent: Optional[str] = None,
+) -> bool:
+    """
+    Conservatively evaluate whether a user goal is purely a simple, unconstrained
+    observation request whose answer is directly provided by the raw tool observation.
+
+    Direct completion is permitted ONLY when the user goal is positively recognized
+    as an unambiguous, general observation request for the specific tool.
+    Targeted application queries, entity filtering, property extraction, counting,
+    aggregation, compound clauses, or ambiguous queries MUST fall through to model synthesis.
+    """
+    norm = normalize_observation_query(user_goal)
+    if not norm:
+        return False
+
+    # 1. Deterministic positive recognition check:
+    # Query MUST match an explicitly recognized canonical observation query for the tool.
+    allowed_queries = CANONICAL_OBSERVATION_QUERIES.get(tool_name)
+    if allowed_queries is None or norm not in allowed_queries:
+        return False
+
+    # 2. Defense-in-depth: Conjunctions, conditional clauses, or secondary actions
+    if re.search(
+        r"\b(and|then|after|also|if|when|while|count|how many|total|number of|report|tell|summarize|filter|extract|focusing|especially|specifically|only)\b",
+        norm,
+    ):
+        return False
+
+    # 3. Structural intent checks:
+    # If the SLM's classified intent indicates multi-step or mismatched domain
+    compound_intents = {
+        "ui_inspection",
+        "element_inspection",
+        "multi_step",
+        "compound_action",
+        "app_automation",
+        "full_inspection",
+    }
+    intent_lower = (intent or "").lower().strip()
+    if tool_name in ("list_open_windows", "list_processes") and intent_lower in compound_intents:
+        return False
+
+    # 4. For inspect_window_ui_elements, disallow mutating interaction verbs
+    if tool_name == "inspect_window_ui_elements":
+        if re.search(r"\b(click|press|type|enter|select|toggle)\b", norm):
+            return False
+
+    return True
 
 
 class AgentExecutor:
@@ -343,13 +517,36 @@ class AgentExecutor:
                 state.steps.append(exec_step)
                 trace.steps.append(exec_step)
 
+                # If intermediate tool execution failed in a multi-step batch, halt remaining steps
+                if not tool_res.success:
+                    if len(decision.steps) > 1:
+                        err_msg = (
+                            f"Step {state.current_step} ('{step_item.tool}') failed: "
+                            f"{tool_res.error or 'Tool execution failed.'}"
+                        )
+                        logger.warning(err_msg)
+                        state.status = ExecutionStatus.ERROR
+                        state.error_message = err_msg
+                    break
+
                 # F. Check Direct Observation Completion policy
                 # Avoids second LLM synthesis call when single-tool read-only desktop observation is complete
                 prior_tool_steps = [s for s in state.steps if s.action_type == ActionType.TOOL_CALL]
+                is_single_tool_plan = (
+                    getattr(decision, "planned_steps_count", len(decision.steps)) == 1
+                    and len(decision.steps) == 1
+                    and len(prior_tool_steps) == 1
+                )
+                is_simple_obs = is_simple_observation_request(
+                    user_goal=state.user_goal,
+                    tool_name=step_item.tool,
+                    intent=decision.intent,
+                )
+
                 if (
                     self.direct_observation_completion
-                    and getattr(decision, "planned_steps_count", len(decision.steps)) == 1
-                    and len(prior_tool_steps) == 1
+                    and is_single_tool_plan
+                    and is_simple_obs
                     and step_item.tool in DIRECT_COMPLETION_TOOLS
                     and tool_res.success
                     and bool(tool_res.output and tool_res.output.strip())
